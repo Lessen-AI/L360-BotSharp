@@ -2,8 +2,6 @@ using BotSharp.Abstraction.MultiTenancy;
 using BotSharp.Abstraction.MultiTenancy.Options;
 using Microsoft.Extensions.Options;
 using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace BotSharp.Plugin.MultiTenancy.MultiTenancy;
 
@@ -23,7 +21,7 @@ public class DefaultConnectionStringResolver : IConnectionStringResolver
         _tenantStore = tenantStore;
     }
 
-    public async Task<string?> GetConnectionStringAsync(string connectionStringName, CancellationToken cancellationToken = default)
+    public string? GetConnectionString(string connectionStringName)
     {
         var options = _tenantStoreOptions.CurrentValue;
         if (!options.Enabled) return null;
@@ -43,7 +41,7 @@ public class DefaultConnectionStringResolver : IConnectionStringResolver
         }
 
         // Fallback to store (e.g. DB)
-        var storeTenants = await _tenantStore.GetTenantsAsync(cancellationToken);
+        var storeTenants = _tenantStore.GetTenants();
         var storeTenant = storeTenants.FirstOrDefault(t => t.Id == _currentTenant.Id.Value);
         if (storeTenant?.ConnectionStrings != null && storeTenant.ConnectionStrings.TryGetValue(connectionStringName, out var sv))
         {
@@ -53,10 +51,10 @@ public class DefaultConnectionStringResolver : IConnectionStringResolver
         return null;
     }
 
-    public Task<string?> GetConnectionStringAsync<TContext>(CancellationToken cancellationToken = default)
+    public string? GetConnectionString<TContext>()
     {
         var contextType = typeof(TContext);
         var connStringName = ConnectionStringNameAttribute.GetConnStringName(contextType);
-        return GetConnectionStringAsync(connStringName, cancellationToken);
+        return GetConnectionString(connStringName);
     }
 }

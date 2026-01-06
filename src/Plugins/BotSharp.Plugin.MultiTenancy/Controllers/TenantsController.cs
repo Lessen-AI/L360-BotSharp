@@ -1,10 +1,9 @@
 using BotSharp.Abstraction.MultiTenancy;
+using BotSharp.Abstraction.MultiTenancy.Options;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using BotSharp.Abstraction.MultiTenancy.Options;
 using System.Linq;
-using System.Threading.Tasks;
 
 namespace BotSharp.Plugin.MultiTenancy.Controllers;
 
@@ -23,14 +22,14 @@ public class TenantsController : ControllerBase
     [AllowAnonymous]
     [HttpGet]
     [Route("/tenants/options")]
-    public async Task<IActionResult> Options()
+    public IActionResult Options()
     {
         if (!_options.CurrentValue.Enabled)
         {
             return Ok(System.Array.Empty<object>());
         }
 
-        var tenants = await _tenantStore.GetTenantsAsync();
+        var tenants = _tenantStore.GetTenants();
         var payload = tenants
             .Select(t => new { tenantId = t.Id, name = t.Name })
             .Distinct()

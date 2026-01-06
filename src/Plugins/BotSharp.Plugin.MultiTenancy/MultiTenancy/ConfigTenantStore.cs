@@ -16,8 +16,8 @@ public class ConfigTenantStore : ITenantStore
         _options = options.CurrentValue;
     }
 
-    public async Task<IReadOnlyList<TenantConfiguration>> GetTenantsAsync(CancellationToken cancellationToken = default)
+    public List<TenantConfiguration> GetTenants()
     {
-        return await Task.FromResult<IReadOnlyList<TenantConfiguration>>(_options.Tenants);
+        return [.. _options.Tenants];
     }
 }

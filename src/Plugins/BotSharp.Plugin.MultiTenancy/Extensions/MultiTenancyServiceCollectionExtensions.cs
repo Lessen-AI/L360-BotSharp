@@ -39,10 +39,10 @@ public static class MultiTenancyServiceCollectionExtensions
 
         // tenant store infrastructure
         services.AddMemoryCache();
-        services.TryAddSingleton<ITenantRepository, NullTenantRepository>();
-        services.TryAddSingleton<ConfigTenantStore>();
-        services.TryAddSingleton<DbTenantStore>();
-        services.TryAddSingleton<ITenantStore>(sp => new CompositeTenantStore(
+        services.TryAddScoped<ITenantRepository, NullTenantRepository>();
+        services.TryAddScoped<ConfigTenantStore>();
+        services.TryAddScoped<DbTenantStore>();
+        services.TryAddScoped<ITenantStore>(sp => new CompositeTenantStore(
             sp.GetRequiredService<IOptionsMonitor<TenantStoreOptions>>(),
             new List<ITenantStore>
             {
@@ -51,7 +51,7 @@ public static class MultiTenancyServiceCollectionExtensions
             }));
 
         services.TryAddScoped<IConnectionStringResolver, DefaultConnectionStringResolver>();
-        services.TryAddSingleton<ITenantFeature, TenantFeature>();
+        services.TryAddScoped<ITenantFeature, TenantFeature>();
         services.TryAddScoped<ITenantConnectionProvider, TenantConnectionProvider>();
 
         return services;

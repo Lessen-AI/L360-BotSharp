@@ -1,7 +1,5 @@
 using BotSharp.Abstraction.MultiTenancy;
 using Microsoft.Extensions.Configuration;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace BotSharp.Plugin.MultiTenancy.MultiTenancy;
 
@@ -16,18 +14,18 @@ public class TenantConnectionProvider : ITenantConnectionProvider
         _configuration = configuration;
     }
 
-    public async Task<string> GetConnectionStringAsync(string name, CancellationToken cancellationToken = default)
+    public string GetConnectionString(string name)
     {
         // Prefer app-level connection strings
         var fallback = _configuration.GetConnectionString(name);
         if (!string.IsNullOrWhiteSpace(fallback)) return fallback;
 
-        var cs = await _resolver.GetConnectionStringAsync(name, cancellationToken);
+        var cs = _resolver.GetConnectionString(name);
         return cs ?? string.Empty;
     }
 
-    public async Task<string> GetDefaultConnectionStringAsync(CancellationToken cancellationToken = default)
+    public string GetDefaultConnectionString()
     {
-        return await GetConnectionStringAsync("Default", cancellationToken);
+        return GetConnectionString("Default");
     }
 }

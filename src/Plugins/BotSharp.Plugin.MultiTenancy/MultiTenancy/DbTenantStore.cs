@@ -4,8 +4,6 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace BotSharp.Plugin.MultiTenancy.MultiTenancy;
 
@@ -24,23 +22,23 @@ public class DbTenantStore : ITenantStore
         _logger = logger;
     }
 
-    public async Task<IReadOnlyList<TenantConfiguration>> GetTenantsAsync(CancellationToken cancellationToken = default)
+    public List<TenantConfiguration> GetTenants()
     {
-        if (_cache.TryGetValue(CacheKey, out IReadOnlyList<TenantConfiguration> cached))
+        if (_cache.TryGetValue(CacheKey, out List<TenantConfiguration> cached))
         {
             return cached;
         }
 
         try
         {
-            var tenants = await _repo.GetTenantsAsync(cancellationToken);
+            var tenants = _repo.GetTenants();
             _cache.Set(CacheKey, tenants, TimeSpan.FromMinutes(5));
             return tenants;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "DbTenantStore: failed to load tenant configurations from database.");
-            return Array.Empty<TenantConfiguration>();
+            return new List<TenantConfiguration>();
         }
     }
 }

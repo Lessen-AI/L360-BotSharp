@@ -1,10 +1,8 @@
 using BotSharp.Abstraction.MultiTenancy;
 using BotSharp.Abstraction.MultiTenancy.Options;
 using Microsoft.Extensions.Options;
-using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Linq;
 
 namespace BotSharp.Plugin.MultiTenancy.MultiTenancy;
 
@@ -19,23 +17,23 @@ public class CompositeTenantStore : ITenantStore
         _stores = stores;
     }
 
-    public async Task<IReadOnlyList<TenantConfiguration>> GetTenantsAsync(CancellationToken cancellationToken = default)
+    public List<TenantConfiguration> GetTenants()
     {
         // If configuration has tenants, prefer it.
         var configured = _options.CurrentValue.Tenants;
         if (configured is { Length: > 0 })
         {
-            return configured;
+            return configured.ToList();
         }
 
         // Otherwise, try other stores in order.
         foreach (var s in _stores)
         {
             if (s is ConfigTenantStore) continue;
-            var tenants = await s.GetTenantsAsync(cancellationToken);
+            var tenants = s.GetTenants();
             if (tenants.Count > 0) return tenants;
         }
 
-        return Array.Empty<TenantConfiguration>();
+        return new List<TenantConfiguration>();
     }
 }
