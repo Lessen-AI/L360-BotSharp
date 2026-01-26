@@ -1,4 +1,5 @@
 using Refit;
+using System.Net.Http.Headers;
 
 namespace BotSharp.Plugin.Membase;
 
@@ -16,12 +17,12 @@ public class MembasePlugin : IBotSharpPlugin
         services.AddSingleton(sp => dbSettings);
 
         services
-            .AddRefitClient<IMembaseApi>(new RefitSettings
+            .AddRefitClient<IMembaseApi>()
+            .ConfigureHttpClient(c =>
             {
-                AuthorizationHeaderValueGetter = (message, cancellation) => 
-                    Task.FromResult($"Bearer {dbSettings.ApiKey}")
-            })
-            .ConfigureHttpClient(c => c.BaseAddress = new Uri(dbSettings.Host));
+                c.BaseAddress = new Uri(dbSettings.Host);
+                c.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", dbSettings.ApiKey);
+            });
 
         services.AddScoped<ICypherGraphService, MembaseService>();
     }
