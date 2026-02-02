@@ -1,6 +1,8 @@
+using BotSharp.Abstraction.MultiTenancy;
+
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class ConversationDocument : MongoBase
+public class ConversationDocument : MongoBase, IMultiTenant
 {
     public string AgentId { get; set; } = default!;
     public string UserId { get; set; } = default!;
@@ -15,4 +17,5 @@ public class ConversationDocument : MongoBase
     public DateTime CreatedTime { get; set; }
     public DateTime UpdatedTime { get; set; }
     public Dictionary<string, BsonDocument> LatestStates { get; set; } = new();
+    public Guid? TenantId { get; set; }
 }

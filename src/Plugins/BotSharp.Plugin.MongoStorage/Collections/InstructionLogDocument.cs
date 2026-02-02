@@ -1,8 +1,9 @@
 using BotSharp.Abstraction.Loggers.Models;
+using BotSharp.Abstraction.MultiTenancy;
 
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class InstructionLogDocument : MongoBase
+public class InstructionLogDocument : MongoBase, IMultiTenant
 {
     public string? AgentId { get; set; }
     public string Provider { get; set; } = default!;
@@ -14,6 +15,7 @@ public class InstructionLogDocument : MongoBase
     public string? UserId { get; set; }
     public Dictionary<string, BsonDocument> States { get; set; } = new();
     public DateTime CreatedTime { get; set; }
+    public Guid? TenantId { get; set; }
 
     public static InstructionLogDocument ToMongoModel(InstructionLogModel log)
     {

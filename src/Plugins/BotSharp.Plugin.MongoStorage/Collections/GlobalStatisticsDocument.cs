@@ -1,6 +1,8 @@
+using BotSharp.Abstraction.MultiTenancy;
+
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class GlobalStatisticsDocument : MongoBase
+public class GlobalStatisticsDocument : MongoBase, IMultiTenant
 {
     public string AgentId { get; set; } = null!;
     public StatsCountMongoElement Count { get; set; } = new();
@@ -10,4 +12,5 @@ public class GlobalStatisticsDocument : MongoBase
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
     public string Interval { get; set; } = default!;
+    public Guid? TenantId { get; set; }
 }

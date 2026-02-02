@@ -1,6 +1,8 @@
+using BotSharp.Abstraction.MultiTenancy;
+
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class KnowledgeCollectionFileMetaDocument : MongoBase
+public class KnowledgeCollectionFileMetaDocument : MongoBase, IMultiTenant
 {
     public string Collection { get; set; } = default!;
     public Guid FileId { get; set; }
@@ -12,4 +14,5 @@ public class KnowledgeCollectionFileMetaDocument : MongoBase
     public KnowledgeFileMetaRefMongoModel? RefData { get; set; }
     public DateTime CreatedDate { get; set; }
     public string CreateUserId { get; set; } = default!;
+    public Guid? TenantId { get; set; }
 }

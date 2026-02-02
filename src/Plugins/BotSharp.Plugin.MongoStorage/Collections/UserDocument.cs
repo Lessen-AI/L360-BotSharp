@@ -1,9 +1,10 @@
+using BotSharp.Abstraction.MultiTenancy;
 using BotSharp.Abstraction.Users.Enums;
 using BotSharp.Abstraction.Users.Models;
 
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class UserDocument : MongoBase
+public class UserDocument : MongoBase, IMultiTenant
 {
     public string UserName { get; set; } = null!;
     public string FirstName { get; set; } = null!;
@@ -28,6 +29,7 @@ public class UserDocument : MongoBase
     public DateTime UpdatedTime { get; set; }
 
     public Dashboard? Dashboard { get; set; }
+    public Guid? TenantId { get; set; }
 
     public User ToUser()
     {

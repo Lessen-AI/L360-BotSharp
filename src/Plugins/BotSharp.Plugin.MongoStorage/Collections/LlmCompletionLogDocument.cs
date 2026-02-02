@@ -1,6 +1,8 @@
+using BotSharp.Abstraction.MultiTenancy;
+
 namespace BotSharp.Plugin.MongoStorage.Collections;
 
-public class LlmCompletionLogDocument : MongoBase
+public class LlmCompletionLogDocument : MongoBase, IMultiTenant
 {
     public string ConversationId { get; set; } = default!;
     public string MessageId { get; set; } = default!;
@@ -8,4 +10,5 @@ public class LlmCompletionLogDocument : MongoBase
     public string Prompt { get; set; } = default!;
     public string? Response { get; set; }
     public DateTime CreatedTime { get; set; }
+    public Guid? TenantId { get; set; }
 }
