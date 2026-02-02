@@ -10,8 +10,18 @@ public partial class MongoRepository
 {
     public async Task<User?> GetUserByEmail(string email)
     {
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Email == email.ToLower());
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Email == email.ToLower() && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Email == email.ToLower());
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task<User?> GetUserByPhone(string phone, string type = UserType.Client, string regionCode = "CN")
@@ -32,10 +42,22 @@ public partial class MongoRepository
             phoneSecond = (phone ?? "").Substring(regionCode == "US" ? 2 : 3);
         }
 
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
-        && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
-        && (x.Type == type));
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
+                && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
+                && (x.Type == type) && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
+                && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
+                && (x.Type == type));
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task<User?> GetUserByPhoneV2(string phone, string source = UserType.Internal, string regionCode = "CN")
@@ -56,40 +78,102 @@ public partial class MongoRepository
             phoneSecond = (phone ?? "").Substring(regionCode == "US" ? 2 : 3);
         }
 
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
-            && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
-            && (x.Source == source));
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
+                && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
+                && (x.Source == source) && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
+                && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
+                && (x.Source == source));
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task<User?> GetAffiliateUserByPhone(string phone)
     {
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Phone == phone && x.Type == UserType.Affiliate);
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Phone == phone && x.Type == UserType.Affiliate && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Phone == phone && x.Type == UserType.Affiliate);
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task<User?> GetUserById(string id)
     {
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Id == id || (x.ExternalId != null && x.ExternalId == id));
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Id == id || (x.ExternalId != null && x.ExternalId == id)) && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Id == id || (x.ExternalId != null && x.ExternalId == id));
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task<List<User>> GetUserByIds(List<string> ids)
     {
-        var users = await _dc.Users.AsQueryable().Where(x => ids.Contains(x.Id) || (x.ExternalId != null && ids.Contains(x.ExternalId))).ToListAsync();
-        return users?.Any() == true ? users.Select(x => x.ToUser()).ToList() : [];
+        var tenantId = GetCurrentTenantId();
+        List<UserDocument> docs;
+        if (tenantId.HasValue)
+        {
+            docs = await _dc.Users.AsQueryable().Where(x => (ids.Contains(x.Id) || (x.ExternalId != null && ids.Contains(x.ExternalId))) && x.TenantId == tenantId.Value).ToListAsync();
+        }
+        else
+        {
+            docs = await _dc.Users.AsQueryable().Where(x => ids.Contains(x.Id) || (x.ExternalId != null && ids.Contains(x.ExternalId))).ToListAsync();
+        }
+
+        return docs?.Any() == true ? docs.Select(x => x.ToUser()).ToList() : new List<User>();
     }
 
     public async Task<List<User>> GetUsersByAffiliateId(string affiliateId)
     {
-        var users = await _dc.Users.AsQueryable().Where(x => x.AffiliateId == affiliateId).ToListAsync();
-        return users?.Any() == true ? users.Select(x => x.ToUser()).ToList() : [];
+        var tenantId = GetCurrentTenantId();
+        List<UserDocument> docs;
+        if (tenantId.HasValue)
+        {
+            docs = await _dc.Users.AsQueryable().Where(x => x.AffiliateId == affiliateId && x.TenantId == tenantId.Value).ToListAsync();
+        }
+        else
+        {
+            docs = await _dc.Users.AsQueryable().Where(x => x.AffiliateId == affiliateId).ToListAsync();
+        }
+
+        return docs?.Any() == true ? docs.Select(x => x.ToUser()).ToList() : new List<User>();
     }
 
     public async Task<User?> GetUserByUserName(string userName)
     {
-        var user = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.UserName == userName.ToLower());
-        return user != null ? user.ToUser() : null;
+        var tenantId = GetCurrentTenantId();
+        UserDocument? doc = null;
+        if (tenantId.HasValue)
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.UserName == userName.ToLower() && x.TenantId == tenantId.Value);
+        }
+        else
+        {
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.UserName == userName.ToLower());
+        }
+
+        return doc != null ? doc.ToUser() : null;
     }
 
     public async Task CreateUser(User user)
@@ -119,6 +203,11 @@ public partial class MongoRepository
             CreatedTime = DateTime.UtcNow,
             UpdatedTime = DateTime.UtcNow
         };
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            userCollection.TenantId = tenantId;
+        }
 
         await _dc.Users.InsertOneAsync(userCollection);
     }
@@ -215,6 +304,12 @@ public partial class MongoRepository
 
         var userBuilder = Builders<UserDocument>.Filter;
         var userFilters = new List<FilterDefinition<UserDocument>>() { userBuilder.Empty };
+        
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            userFilters.Add(userBuilder.Eq(x => x.TenantId, tenantId.Value));
+        }
 
         // Apply filters
         if (!filter.UserIds.IsNullOrEmpty())

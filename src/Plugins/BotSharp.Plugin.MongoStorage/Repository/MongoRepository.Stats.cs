@@ -15,12 +15,18 @@ public partial class MongoRepository
         var (startTime, endTime) = BotSharpStats.BuildTimeInterval(recordTime, interval);
 
         var builder = Builders<GlobalStatisticsDocument>.Filter;
+        var tenantId = GetCurrentTenantId();
         var filters = new List<FilterDefinition<GlobalStatisticsDocument>>()
         {
             builder.Eq(x => x.AgentId, agentId),
             builder.Eq(x => x.StartTime, startTime),
             builder.Eq(x => x.EndTime, endTime)
         };
+
+        if (tenantId.HasValue)
+        {
+            filters.Add(builder.Eq(x => x.TenantId, tenantId.Value));
+        }
 
         var filterDef = builder.And(filters);
         var found = await _dc.GlobalStats.Find(filterDef).FirstOrDefaultAsync();
@@ -59,12 +65,18 @@ public partial class MongoRepository
         delta.RecordTime = DateTime.SpecifyKind(delta.RecordTime, DateTimeKind.Utc);
 
         var builder = Builders<GlobalStatisticsDocument>.Filter;
+        var tenantId = GetCurrentTenantId();
         var filters = new List<FilterDefinition<GlobalStatisticsDocument>>()
         {
             builder.Eq(x => x.AgentId, delta.AgentId),
             builder.Eq(x => x.StartTime, startTime),
             builder.Eq(x => x.EndTime, endTime)
         };
+
+        if (tenantId.HasValue)
+        {
+            filters.Add(builder.Eq(x => x.TenantId, tenantId.Value));
+        }
 
         var filterDef = builder.And(filters);
         var updateDef = Builders<GlobalStatisticsDocument>.Update
@@ -80,6 +92,11 @@ public partial class MongoRepository
                             .Set(x => x.EndTime, endTime)
                             .Set(x => x.Interval, delta.Interval)
                             .Set(x => x.RecordTime, delta.RecordTime);
+
+        if (tenantId.HasValue)
+        {
+            updateDef = updateDef.Set(x => x.TenantId, tenantId.Value);
+        }
 
         await _dc.GlobalStats.UpdateOneAsync(filterDef, updateDef, _options);
         return true;

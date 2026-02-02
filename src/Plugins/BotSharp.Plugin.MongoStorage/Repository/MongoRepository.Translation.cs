@@ -15,6 +15,8 @@ public partial class MongoRepository
 
         var hashTexts = queries.Where(x => !string.IsNullOrEmpty(x.HashText)).Select(x => x.HashText).ToList();
         var filter = Builders<TranslationMemoryDocument>.Filter.In(x => x.HashText, hashTexts);
+        filter = WithTenant(filter);
+
         var memories = await _dc.TranslationMemories.Find(filter).ToListAsync();
         if (memories.IsNullOrEmpty()) return list;
 
@@ -47,8 +49,11 @@ public partial class MongoRepository
     {
         if (inputs.IsNullOrEmpty()) return false;
 
+        var tenantId = GetCurrentTenantId();
         var hashTexts = inputs.Where(x => !string.IsNullOrEmpty(x.HashText)).Select(x => x.HashText).ToList();
         var filter = Builders<TranslationMemoryDocument>.Filter.In(x => x.HashText, hashTexts);
+        filter = WithTenant(filter);
+
         var memories = await _dc.TranslationMemories.Find(filter).ToListAsync() ?? [];
 
         var newMemories = new List<TranslationMemoryDocument>();
@@ -80,7 +85,8 @@ public partial class MongoRepository
                         Id = Guid.NewGuid().ToString(),
                         OriginalText = input.OriginalText,
                         HashText = input.HashText,
-                        Translations = new List<TranslationMemoryMongoElement> { newItem }
+                        Translations = new List<TranslationMemoryMongoElement> { newItem },
+                        TenantId = tenantId
                     });
                 }
                 else

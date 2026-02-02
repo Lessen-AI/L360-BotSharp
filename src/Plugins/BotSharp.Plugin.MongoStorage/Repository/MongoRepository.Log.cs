@@ -26,6 +26,11 @@ public partial class MongoRepository
             Response = log.Response,
             CreatedTime = log.CreatedTime
         };
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            data.TenantId = tenantId;
+        }
         await _dc.LlmCompletionLogs.InsertOneAsync(data);
     }
 
@@ -35,8 +40,8 @@ public partial class MongoRepository
     public async Task SaveConversationContentLog(ContentLogOutputModel log)
     {
         if (log == null) return;
-
         var filter = Builders<ConversationDocument>.Filter.Eq(x => x.Id, log.ConversationId);
+        filter = WithTenant(filter);
         var found = await _dc.Conversations.Find(filter).FirstOrDefaultAsync();
         if (found == null) return;
 
@@ -51,6 +56,11 @@ public partial class MongoRepository
             Content = log.Content,
             CreatedTime = log.CreatedTime
         };
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            logDoc.TenantId = tenantId;
+        }
 
         await _dc.ContentLogs.InsertOneAsync(logDoc);
     }
@@ -65,7 +75,10 @@ public partial class MongoRepository
         };
         var logSortDef = Builders<ConversationContentLogDocument>.Sort.Descending(x => x.CreatedTime);
 
-        var docs = await _dc.ContentLogs.Find(builder.And(logFilters)).Sort(logSortDef).Limit(filter.Size).ToListAsync();
+        var logFilterDef = builder.And(logFilters);
+        logFilterDef = WithTenant(logFilterDef);
+
+        var docs = await _dc.ContentLogs.Find(logFilterDef).Sort(logSortDef).Limit(filter.Size).ToListAsync();
         var logs = docs.Select(x => new ContentLogOutputModel
         {
             ConversationId = x.ConversationId,
@@ -92,19 +105,24 @@ public partial class MongoRepository
     public async Task SaveConversationStateLog(ConversationStateLogModel log)
     {
         if (log == null) return;
-
         var filter = Builders<ConversationDocument>.Filter.Eq(x => x.Id, log.ConversationId);
+        filter = WithTenant(filter);
         var found = await _dc.Conversations.Find(filter).FirstOrDefaultAsync();
         if (found == null) return;
 
         var logDoc = new ConversationStateLogDocument
         {
             ConversationId = log.ConversationId,
-            AgentId= log.AgentId,
+            AgentId = log.AgentId,
             MessageId = log.MessageId,
             States = log.States,
             CreatedTime = log.CreatedTime
         };
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            logDoc.TenantId = tenantId;
+        }
 
         await _dc.StateLogs.InsertOneAsync(logDoc);
     }
@@ -119,7 +137,10 @@ public partial class MongoRepository
         };
         var logSortDef = Builders<ConversationStateLogDocument>.Sort.Descending(x => x.CreatedTime);
 
-        var docs = await _dc.StateLogs.Find(builder.And(logFilters)).Sort(logSortDef).Limit(filter.Size).ToListAsync();
+        var logFilterDef = builder.And(logFilters);
+        logFilterDef = WithTenant(logFilterDef);
+
+        var docs = await _dc.StateLogs.Find(logFilterDef).Sort(logSortDef).Limit(filter.Size).ToListAsync();
         var logs = docs.Select(x => new ConversationStateLogModel
         {
             ConversationId = x.ConversationId,
@@ -148,6 +169,7 @@ public partial class MongoRepository
         }
 
         var docs = new List<InstructionLogDocument>();
+        var tenantId = GetCurrentTenantId();
         foreach (var log in logs)
         {
             var doc = InstructionLogDocument.ToMongoModel(log);
@@ -174,6 +196,10 @@ public partial class MongoRepository
                     doc.States[pair.Key] = json;
                 }
             }
+            if (tenantId.HasValue)
+            {
+                doc.TenantId = tenantId;
+            }
             docs.Add(doc);
         }
 
@@ -190,7 +216,10 @@ public partial class MongoRepository
         }
 
         var id = updateInstructionStates?.LogId;
-        var logDoc = await _dc.InstructionLogs.Find(p => p.Id == id).FirstOrDefaultAsync();
+        var filter = Builders<InstructionLogDocument>.Filter.Eq(x => x.Id, id);
+        filter = WithTenant(filter);
+
+        var logDoc = await _dc.InstructionLogs.Find(filter).FirstOrDefaultAsync();
         if (logDoc == null)
         {
             return false;
@@ -220,7 +249,7 @@ public partial class MongoRepository
                 logDoc.States[key] = json;
             }
         }
-        await _dc.InstructionLogs.ReplaceOneAsync(p => p.Id == id, logDoc);
+        await _dc.InstructionLogs.ReplaceOneAsync(filter, logDoc);
         return true;
     }
 
@@ -309,6 +338,7 @@ public partial class MongoRepository
         }
 
         var filterDef = logBuilder.And(logFilters);
+        filterDef = WithTenant(filterDef);
         var sortDef = Builders<InstructionLogDocument>.Sort.Descending(x => x.CreatedTime);
 
         var docsTask = _dc.InstructionLogs.FindAsync(filterDef, options: new()
@@ -370,7 +400,10 @@ public partial class MongoRepository
             filters.Add(builder.Lte(x => x.CreatedTime, filter.EndTime.Value));
         }
 
-        var convDocs = await _dc.InstructionLogs.Find(builder.And(filters))
+        var searchFilter = builder.And(filters);
+        searchFilter = WithTenant(searchFilter);
+
+        var convDocs = await _dc.InstructionLogs.Find(searchFilter)
                                           .Sort(sortDef)
                                           .Limit(filter.LogLimit)
                                           .ToListAsync();

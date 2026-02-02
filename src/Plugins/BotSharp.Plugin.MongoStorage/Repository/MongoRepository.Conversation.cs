@@ -28,6 +28,11 @@ public partial class MongoRepository
             UpdatedTime = utcNow,
             LatestStates = []
         };
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            convDoc.TenantId = tenantId;
+        }
 
         var dialogDoc = new ConversationDialogDocument
         {
@@ -38,6 +43,10 @@ public partial class MongoRepository
             Dialogs = [],
             UpdatedTime = utcNow
         };
+        if (tenantId.HasValue)
+        {
+            dialogDoc.TenantId = tenantId;
+        }
 
         var stateDoc = new ConversationStateDocument
         {
@@ -49,6 +58,10 @@ public partial class MongoRepository
             Breakpoints = [],
             UpdatedTime = utcNow
         };
+        if (tenantId.HasValue)
+        {
+            stateDoc.TenantId = tenantId;
+        }
 
         try
         {
@@ -75,6 +88,14 @@ public partial class MongoRepository
         var filterStateLog = Builders<ConversationStateLogDocument>.Filter.In(x => x.ConversationId, conversationIds);
         var conbTabItems = Builders<CrontabItemDocument>.Filter.In(x => x.ConversationId, conversationIds);
 
+        // apply tenant filter if present
+        filterConv = WithTenant(filterConv);
+        filterDialog = WithTenant(filterDialog);
+        filterSates = WithTenant(filterSates);
+        filterPromptLog = WithTenant(filterPromptLog);
+        filterContentLog = WithTenant(filterContentLog);
+        filterStateLog = WithTenant(filterStateLog);
+
         var promptLogDeleted = await _dc.LlmCompletionLogs.DeleteManyAsync(filterPromptLog);
         var contentLogDeleted = await _dc.ContentLogs.DeleteManyAsync(filterContentLog);
         var stateLogDeleted = await _dc.StateLogs.DeleteManyAsync(filterStateLog);
@@ -95,6 +116,7 @@ public partial class MongoRepository
         if (string.IsNullOrEmpty(conversationId)) return dialogs;
 
         var filter = Builders<ConversationDialogDocument>.Filter.Eq(x => x.ConversationId, conversationId);
+        filter = WithTenant(filter);
         var foundDialog = await _dc.ConversationDialogs.Find(filter).FirstOrDefaultAsync();
         if (foundDialog == null) return dialogs;
 
@@ -109,6 +131,8 @@ public partial class MongoRepository
 
         var filterConv = Builders<ConversationDocument>.Filter.Eq(x => x.Id, conversationId);
         var filterDialog = Builders<ConversationDialogDocument>.Filter.Eq(x => x.ConversationId, conversationId);
+        filterConv = WithTenant(filterConv);
+        filterDialog = WithTenant(filterDialog);
         var dialogElements = dialogs.Select(x => DialogMongoElement.ToMongoElement(x)).ToList();
         var updateDialog = Builders<ConversationDialogDocument>.Update.PushEach(x => x.Dialogs, dialogElements)
                                                                       .Set(x => x.UpdatedTime, DateTime.UtcNow);
@@ -128,6 +152,7 @@ public partial class MongoRepository
             .Set(x => x.UpdatedTime, DateTime.UtcNow)
             .Set(x => x.Title, title);
 
+        filterConv = WithTenant(filterConv);
         await _dc.Conversations.UpdateOneAsync(filterConv, updateConv);
     }
     public async Task UpdateConversationTitleAlias(string conversationId, string titleAlias)
@@ -139,6 +164,7 @@ public partial class MongoRepository
             .Set(x => x.UpdatedTime, DateTime.UtcNow)
             .Set(x => x.TitleAlias, titleAlias);
 
+        filterConv = WithTenant(filterConv);
         await _dc.Conversations.UpdateOneAsync(filterConv, updateConv);
     }
 
@@ -314,6 +340,8 @@ public partial class MongoRepository
 
         var filterConv = Builders<ConversationDocument>.Filter.Eq(x => x.Id, conversationId);
         var filterDialog = Builders<ConversationDialogDocument>.Filter.Eq(x => x.ConversationId, conversationId);
+        filterConv = WithTenant(filterConv);
+        filterDialog = WithTenant(filterDialog);
 
         var conv = await _dc.Conversations.Find(filterConv).FirstOrDefaultAsync();
         var dialog = await _dc.ConversationDialogs.Find(filterDialog).FirstOrDefaultAsync();
@@ -457,6 +485,8 @@ public partial class MongoRepository
 
         // Sort and paginate
         var filterDef = convBuilder.And(convFilters);
+        // apply tenant filter if present
+        filterDef = WithTenant(filterDef);
         var sortDef = Builders<ConversationDocument>.Sort.Descending(x => x.CreatedTime);
         var pager = filter?.Pager ?? new Pagination();
 

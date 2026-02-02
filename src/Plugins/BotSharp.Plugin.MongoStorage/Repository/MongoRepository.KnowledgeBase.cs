@@ -21,9 +21,27 @@ public partial class MongoRepository
                 TextEmbedding = KnowledgeEmbeddingConfigMongoModel.ToMongoModel(x.TextEmbedding)
             })?.ToList() ?? [];
 
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            foreach (var d in docs)
+            {
+                d.TenantId = tenantId;
+            }
+        }
+
         if (reset)
         {
-            await _dc.KnowledgeCollectionConfigs.DeleteManyAsync(filter);
+            if (tenantId.HasValue)
+            {
+                var tenantFilter = Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.TenantId, tenantId);
+                await _dc.KnowledgeCollectionConfigs.DeleteManyAsync(tenantFilter);
+            }
+            else
+            {
+                await _dc.KnowledgeCollectionConfigs.DeleteManyAsync(filter);
+            }
+
             await _dc.KnowledgeCollectionConfigs.InsertManyAsync(docs);
             return true;
         }
@@ -34,6 +52,8 @@ public partial class MongoRepository
 
         var names = docs.Select(x => x.Name).ToList();
         filter = Builders<KnowledgeCollectionConfigDocument>.Filter.In(x => x.Name, names);
+        filter = WithTenant(filter);
+
         var savedConfigs = await _dc.KnowledgeCollectionConfigs.Find(filter).ToListAsync();
         
         foreach (var doc in docs)
@@ -62,6 +82,10 @@ public partial class MongoRepository
             foreach (var doc in updateDocs)
             {
                 filter = Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.Id, doc.Id);
+                if (tenantId.HasValue)
+                {
+                    filter = Builders<KnowledgeCollectionConfigDocument>.Filter.And(filter, Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.TenantId, tenantId));
+                }
                 await _dc.KnowledgeCollectionConfigs.ReplaceOneAsync(filter, doc);
             }
         }
@@ -74,6 +98,8 @@ public partial class MongoRepository
         if (string.IsNullOrWhiteSpace(collectionName)) return false;
 
         var filter = Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.Name, collectionName);
+        filter = WithTenant(filter);
+
         var deleted = await _dc.KnowledgeCollectionConfigs.DeleteManyAsync(filter);
         return deleted.DeletedCount > 0;
     }
@@ -87,6 +113,12 @@ public partial class MongoRepository
 
         var builder = Builders<KnowledgeCollectionConfigDocument>.Filter;
         var filters = new List<FilterDefinition<KnowledgeCollectionConfigDocument>> { builder.Empty };
+
+        var tenantId = GetCurrentTenantId();
+        if (tenantId.HasValue)
+        {
+            filters.Add(builder.Eq(x => x.TenantId, tenantId));
+        }
 
         // Apply filters
         if (!filter.CollectionNames.IsNullOrEmpty())
