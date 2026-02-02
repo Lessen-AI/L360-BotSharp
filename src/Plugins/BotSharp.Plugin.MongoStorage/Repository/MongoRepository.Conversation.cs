@@ -29,7 +29,7 @@ public partial class MongoRepository
             LatestStates = []
         };
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             convDoc.TenantId = tenantId;
         }
@@ -43,7 +43,7 @@ public partial class MongoRepository
             Dialogs = [],
             UpdatedTime = utcNow
         };
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             dialogDoc.TenantId = tenantId;
         }
@@ -58,7 +58,7 @@ public partial class MongoRepository
             Breakpoints = [],
             UpdatedTime = utcNow
         };
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             stateDoc.TenantId = tenantId;
         }

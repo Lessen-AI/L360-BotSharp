@@ -12,5 +12,5 @@ public class ConversationContentLogDocument : MongoBase, IMultiTenant
     public string Source { get; set; } = default!;
     public string Content { get; set; } = default!;
     public DateTime CreatedTime { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

@@ -15,7 +15,7 @@ public class InstructionLogDocument : MongoBase, IMultiTenant
     public string? UserId { get; set; }
     public Dictionary<string, BsonDocument> States { get; set; } = new();
     public DateTime CreatedTime { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 
     public static InstructionLogDocument ToMongoModel(InstructionLogModel log)
     {

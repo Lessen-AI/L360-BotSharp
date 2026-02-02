@@ -23,9 +23,9 @@ public partial class MongoRepository
             builder.Eq(x => x.EndTime, endTime)
         };
 
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            filters.Add(builder.Eq(x => x.TenantId, tenantId.Value));
+            filters.Add(builder.Eq(x => x.TenantId, tenantId));
         }
 
         var filterDef = builder.And(filters);
@@ -73,9 +73,9 @@ public partial class MongoRepository
             builder.Eq(x => x.EndTime, endTime)
         };
 
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            filters.Add(builder.Eq(x => x.TenantId, tenantId.Value));
+            filters.Add(builder.Eq(x => x.TenantId, tenantId));
         }
 
         var filterDef = builder.And(filters);
@@ -93,9 +93,9 @@ public partial class MongoRepository
                             .Set(x => x.Interval, delta.Interval)
                             .Set(x => x.RecordTime, delta.RecordTime);
 
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            updateDef = updateDef.Set(x => x.TenantId, tenantId.Value);
+            updateDef = updateDef.Set(x => x.TenantId, tenantId);
         }
 
         await _dc.GlobalStats.UpdateOneAsync(filterDef, updateDef, _options);

@@ -10,5 +10,5 @@ public class ConversationDialogDocument : MongoBase, IMultiTenant
     public DateTime UpdatedTime { get; set; }
     public List<DialogMongoElement> Dialogs { get; set; } = [];
 
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

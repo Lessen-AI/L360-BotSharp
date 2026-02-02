@@ -12,9 +12,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Email == email.ToLower() && x.TenantId == tenantId.Value);
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Email == email.ToLower() && x.TenantId == tenantId);
         }
         else
         {
@@ -44,11 +44,11 @@ public partial class MongoRepository
 
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
                 && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
-                && (x.Type == type) && x.TenantId == tenantId.Value);
+                && (x.Type == type) && x.TenantId == tenantId);
         }
         else
         {
@@ -80,11 +80,11 @@ public partial class MongoRepository
 
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Phone == phone || x.Phone == phoneSecond)
                 && (x.RegionCode == regionCode || string.IsNullOrWhiteSpace(x.RegionCode))
-                && (x.Source == source) && x.TenantId == tenantId.Value);
+                && (x.Source == source) && x.TenantId == tenantId);
         }
         else
         {
@@ -100,9 +100,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Phone == phone && x.Type == UserType.Affiliate && x.TenantId == tenantId.Value);
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.Phone == phone && x.Type == UserType.Affiliate && x.TenantId == tenantId);
         }
         else
         {
@@ -116,9 +116,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Id == id || (x.ExternalId != null && x.ExternalId == id)) && x.TenantId == tenantId.Value);
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => (x.Id == id || (x.ExternalId != null && x.ExternalId == id)) && x.TenantId == tenantId);
         }
         else
         {
@@ -132,9 +132,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         List<UserDocument> docs;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            docs = await _dc.Users.AsQueryable().Where(x => (ids.Contains(x.Id) || (x.ExternalId != null && ids.Contains(x.ExternalId))) && x.TenantId == tenantId.Value).ToListAsync();
+            docs = await _dc.Users.AsQueryable().Where(x => (ids.Contains(x.Id) || (x.ExternalId != null && ids.Contains(x.ExternalId))) && x.TenantId == tenantId).ToListAsync();
         }
         else
         {
@@ -148,9 +148,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         List<UserDocument> docs;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            docs = await _dc.Users.AsQueryable().Where(x => x.AffiliateId == affiliateId && x.TenantId == tenantId.Value).ToListAsync();
+            docs = await _dc.Users.AsQueryable().Where(x => x.AffiliateId == affiliateId && x.TenantId == tenantId).ToListAsync();
         }
         else
         {
@@ -164,9 +164,9 @@ public partial class MongoRepository
     {
         var tenantId = GetCurrentTenantId();
         UserDocument? doc = null;
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.UserName == userName.ToLower() && x.TenantId == tenantId.Value);
+            doc = await _dc.Users.AsQueryable().FirstOrDefaultAsync(x => x.UserName == userName.ToLower() && x.TenantId == tenantId);
         }
         else
         {
@@ -204,7 +204,7 @@ public partial class MongoRepository
             UpdatedTime = DateTime.UtcNow
         };
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             userCollection.TenantId = tenantId;
         }
@@ -306,9 +306,9 @@ public partial class MongoRepository
         var userFilters = new List<FilterDefinition<UserDocument>>() { userBuilder.Empty };
         
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
-            userFilters.Add(userBuilder.Eq(x => x.TenantId, tenantId.Value));
+            userFilters.Add(userBuilder.Eq(x => x.TenantId, tenantId));
         }
 
         // Apply filters

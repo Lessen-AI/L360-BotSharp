@@ -9,5 +9,5 @@ public class ConversationStateLogDocument : MongoBase, IMultiTenant
     public string MessageId { get; set; } = default!;
     public Dictionary<string, string> States { get; set; } = [];
     public DateTime CreatedTime { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

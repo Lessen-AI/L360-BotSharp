@@ -9,5 +9,5 @@ public class UserAgentDocument : MongoBase, IMultiTenant
     public IEnumerable<string> Actions { get; set; } = [];
     public DateTime CreatedTime { get; set; }
     public DateTime UpdatedTime { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

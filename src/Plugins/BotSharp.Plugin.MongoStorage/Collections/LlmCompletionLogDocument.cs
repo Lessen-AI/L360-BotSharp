@@ -10,5 +10,5 @@ public class LlmCompletionLogDocument : MongoBase, IMultiTenant
     public string Prompt { get; set; } = default!;
     public string? Response { get; set; }
     public DateTime CreatedTime { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

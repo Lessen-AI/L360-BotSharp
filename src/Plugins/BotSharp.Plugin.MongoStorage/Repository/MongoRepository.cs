@@ -31,7 +31,7 @@ public partial class MongoRepository : IBotSharpRepository
     public IServiceProvider ServiceProvider => _services;
 
     // Retrieve current tenant id from header "__tenant" or claim "tenantid"
-    private Guid? GetCurrentTenantId()
+    private string? GetCurrentTenantId()
     {
         try
         {
@@ -39,20 +39,20 @@ public partial class MongoRepository : IBotSharpRepository
             var context = accessor?.HttpContext;
             if (context != null)
             {
-                // header has higher priority
+                // claim has higher priority
+                var claim = context.User?.FindFirst("tenantid")?.Value;
+                if (!string.IsNullOrWhiteSpace(claim))
+                {
+                    return claim;
+                }
+
                 if (context.Request.Headers.TryGetValue("__tenant", out var headerVal))
                 {
                     var header = headerVal.FirstOrDefault();
-                    if (!string.IsNullOrWhiteSpace(header) && Guid.TryParse(header, out var hid))
+                    if (!string.IsNullOrWhiteSpace(header))
                     {
-                        return hid;
+                        return header;
                     }
-                }
-
-                var claim = context.User?.FindFirst("tenantid")?.Value;
-                if (!string.IsNullOrWhiteSpace(claim) && Guid.TryParse(claim, out var cid))
-                {
-                    return cid;
                 }
             }
         }
@@ -65,9 +65,9 @@ public partial class MongoRepository : IBotSharpRepository
     private FilterDefinition<T> WithTenant<T>(FilterDefinition<T> filter)
     {
         var tenantId = GetCurrentTenantId();
-        if (!tenantId.HasValue) return filter;
+        if (string.IsNullOrEmpty(tenantId)) return filter;
         var builder = Builders<T>.Filter;
-        var tenantFilter = builder.Eq("TenantId", tenantId.Value);
+        var tenantFilter = builder.Eq("TenantId", tenantId);
         return builder.And(filter, tenantFilter);
     }
 }

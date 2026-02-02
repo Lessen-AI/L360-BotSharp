@@ -22,7 +22,7 @@ public partial class MongoRepository
             })?.ToList() ?? [];
 
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             foreach (var d in docs)
             {
@@ -32,7 +32,7 @@ public partial class MongoRepository
 
         if (reset)
         {
-            if (tenantId.HasValue)
+            if (!string.IsNullOrEmpty(tenantId))
             {
                 var tenantFilter = Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.TenantId, tenantId);
                 await _dc.KnowledgeCollectionConfigs.DeleteManyAsync(tenantFilter);
@@ -82,7 +82,7 @@ public partial class MongoRepository
             foreach (var doc in updateDocs)
             {
                 filter = Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.Id, doc.Id);
-                if (tenantId.HasValue)
+                if (!string.IsNullOrEmpty(tenantId))
                 {
                     filter = Builders<KnowledgeCollectionConfigDocument>.Filter.And(filter, Builders<KnowledgeCollectionConfigDocument>.Filter.Eq(x => x.TenantId, tenantId));
                 }
@@ -115,7 +115,7 @@ public partial class MongoRepository
         var filters = new List<FilterDefinition<KnowledgeCollectionConfigDocument>> { builder.Empty };
 
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             filters.Add(builder.Eq(x => x.TenantId, tenantId));
         }

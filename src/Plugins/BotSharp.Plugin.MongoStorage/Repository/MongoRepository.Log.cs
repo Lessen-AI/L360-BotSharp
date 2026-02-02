@@ -27,7 +27,7 @@ public partial class MongoRepository
             CreatedTime = log.CreatedTime
         };
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             data.TenantId = tenantId;
         }
@@ -57,7 +57,7 @@ public partial class MongoRepository
             CreatedTime = log.CreatedTime
         };
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             logDoc.TenantId = tenantId;
         }
@@ -119,7 +119,7 @@ public partial class MongoRepository
             CreatedTime = log.CreatedTime
         };
         var tenantId = GetCurrentTenantId();
-        if (tenantId.HasValue)
+        if (!string.IsNullOrEmpty(tenantId))
         {
             logDoc.TenantId = tenantId;
         }
@@ -196,7 +196,7 @@ public partial class MongoRepository
                     doc.States[pair.Key] = json;
                 }
             }
-            if (tenantId.HasValue)
+            if (!string.IsNullOrEmpty(tenantId))
             {
                 doc.TenantId = tenantId;
             }

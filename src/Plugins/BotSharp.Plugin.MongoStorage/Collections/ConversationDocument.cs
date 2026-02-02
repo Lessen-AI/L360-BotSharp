@@ -17,5 +17,5 @@ public class ConversationDocument : MongoBase, IMultiTenant
     public DateTime CreatedTime { get; set; }
     public DateTime UpdatedTime { get; set; }
     public Dictionary<string, BsonDocument> LatestStates { get; set; } = new();
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

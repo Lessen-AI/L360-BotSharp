@@ -14,5 +14,5 @@ public class KnowledgeCollectionFileMetaDocument : MongoBase, IMultiTenant
     public KnowledgeFileMetaRefMongoModel? RefData { get; set; }
     public DateTime CreatedDate { get; set; }
     public string CreateUserId { get; set; } = default!;
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }

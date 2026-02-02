@@ -29,7 +29,7 @@ public class UserDocument : MongoBase, IMultiTenant
     public DateTime UpdatedTime { get; set; }
 
     public Dashboard? Dashboard { get; set; }
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 
     public User ToUser()
     {
@@ -57,7 +57,7 @@ public class UserDocument : MongoBase, IMultiTenant
             Permissions = Permissions,
             CreatedTime = CreatedTime,
             UpdatedTime = UpdatedTime,
-            Dashboard = Dashboard
+            Dashboard = Dashboard,
         };
     }
 }

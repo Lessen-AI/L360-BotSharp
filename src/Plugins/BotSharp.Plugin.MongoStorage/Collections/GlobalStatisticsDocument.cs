@@ -12,5 +12,5 @@ public class GlobalStatisticsDocument : MongoBase, IMultiTenant
     public DateTime StartTime { get; set; }
     public DateTime EndTime { get; set; }
     public string Interval { get; set; } = default!;
-    public Guid? TenantId { get; set; }
+    public string? TenantId { get; set; }
 }
