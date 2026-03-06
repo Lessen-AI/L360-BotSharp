@@ -1,4 +1,4 @@
-using BotSharp.Plugin.Membase.Models;
+using BotSharp.Abstraction.Graph;
 using Microsoft.AspNetCore.Http;
 
 namespace BotSharp.Plugin.Membase.Controllers;
@@ -7,14 +7,11 @@ namespace BotSharp.Plugin.Membase.Controllers;
 [ApiController]
 public class MembaseController : ControllerBase
 {
-    private readonly IUserIdentity _user;
     private readonly IServiceProvider _services;
 
     public MembaseController(
-        IUserIdentity user,
         IServiceProvider services)
     {
-        _user = user;
         _services = services;
     }
 
@@ -28,9 +25,7 @@ public class MembaseController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status500InternalServerError)]
-    public async Task<IActionResult> ExecuteGraphQuery(
-        string graphId,
-        [FromBody] CypherQueryRequest request)
+    public async Task<IActionResult> ExecuteGraphQuery(string graphId, [FromBody] CypherQueryRequest request)
     {
         if (string.IsNullOrWhiteSpace(graphId))
         {
@@ -44,10 +39,17 @@ public class MembaseController : ControllerBase
 
         try
         {
-            var cypherGraphService = _services.GetRequiredService<ICypherGraphService>();
-            var result = await cypherGraphService.Execute(graphId, request.Query, request.Parameters);
-
-            return Ok(result);
+            var graph = _services.GetServices<IGraphDb>().First(x => x.Provider == "membase");
+            var result = await graph.ExecuteQueryAsync(query: request.Query, options: new()
+            {
+                GraphId = graphId,
+                Arguments = request.Parameters
+            });
+            return Ok(new
+            {
+                Columns = result.Keys,
+                Items = result.Values
+            });
         }
         catch (Exception ex)
         {

@@ -1,3 +1,4 @@
+using BotSharp.Abstraction.Instructs.Enums;
 using BotSharp.Abstraction.Instructs.Options;
 
 namespace BotSharp.OpenAPI.ViewModels.Instructs;
@@ -10,9 +11,10 @@ public class InstructMessageModel : IncomingMessageModel
     public string? Instruction { get; set; }
     public override string Channel { get; set; } = ConversationChannel.OpenAPI;
     public string? Template { get; set; }
-    public List<InstructFileModel> Files { get; set; } = [];
+    public List<InstructFileModel>? Files { get; set; }
     public CodeInstructOptions? CodeOptions { get; set; }
     public FileInstructOptions? FileOptions { get; set; }
+    public ResponseFormatType? ResponseFormat { get; set; } = null;
 }
 
 

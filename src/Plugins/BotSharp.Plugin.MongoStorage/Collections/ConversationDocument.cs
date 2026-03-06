@@ -14,6 +14,7 @@ public class ConversationDocument : MongoBase, IMultiTenant
     public string Status { get; set; } = default!;
     public int DialogCount { get; set; }
     public List<string> Tags { get; set; } = [];
+
     public DateTime CreatedTime { get; set; }
     public DateTime UpdatedTime { get; set; }
     public Dictionary<string, BsonDocument> LatestStates { get; set; } = new();

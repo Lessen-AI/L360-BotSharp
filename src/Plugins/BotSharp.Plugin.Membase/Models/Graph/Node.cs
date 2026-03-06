@@ -1,20 +1,14 @@
-namespace BotSharp.Abstraction.Knowledges.Models;
+using BotSharp.Abstraction.Graph.Models;
 
-public class GraphQueryResult
-{
-    public string[] Columns { get; set; } = [];
-    public Dictionary<string, object?>[] Items { get; set; } = [];
-}
+namespace BotSharp.Plugin.Membase.Models.Graph;
 
-public class GraphNode
+public class Node
 {
     public string Id { get; set; } = string.Empty;
-
     public List<string> Labels { get; set; } = new();
-
     public object Properties { get; set; } = new();
-
-    public DateTime Time { get; set; } = DateTime.UtcNow;
+    public NodeEmbedding? Embedding { get; set; }
+    public DateTime? Time { get; set; } = DateTime.UtcNow;
 
     public override string ToString()
     {

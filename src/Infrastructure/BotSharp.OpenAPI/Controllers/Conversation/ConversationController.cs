@@ -3,6 +3,7 @@ using BotSharp.Abstraction.Files.Enums;
 using BotSharp.Abstraction.MessageHub.Models;
 using BotSharp.Abstraction.MessageHub.Services;
 using BotSharp.Abstraction.Options;
+using BotSharp.Abstraction.Repositories;
 using BotSharp.Abstraction.Routing;
 using BotSharp.Abstraction.Users.Dtos;
 using BotSharp.Core.Infrastructures;
@@ -25,7 +26,6 @@ public partial class ConversationController : ControllerBase
         _services = services;
         _user = user;
         _jsonOptions = InitJsonOptions(options);
-
     }
 
     [HttpPost("/conversation/{agentId}")]
@@ -68,12 +68,23 @@ public partial class ConversationController : ControllerBase
         var userIds = list.Select(x => x.User.Id).ToList();
         var users = await userService.GetUsers(userIds);
 
+        var files = new List<ConversationFile>();
+        if (filter.IsLoadThumbnail)
+        {
+            var db = _services.GetRequiredService<IBotSharpRepository>();
+            files = await db.GetConversationFiles(new ConversationFileFilter
+            {
+                ConversationIds = list.Select(x => x.Id)
+            });
+        }
+
         foreach (var item in list)
         {
             user = users.FirstOrDefault(x => x.Id == item.User.Id);
             item.User = UserViewModel.FromUser(user);
             var agent = agents.FirstOrDefault(x => x.Id == item.AgentId);
             item.AgentName = agent?.Name ?? "Unkown";
+            item.Thumbnail = !files.IsNullOrEmpty() ? files.FirstOrDefault(x => x.ConversationId == item.Id)?.Thumbnail : null;
         }
 
         return new PagedItems<ConversationViewModel>
@@ -84,11 +95,17 @@ public partial class ConversationController : ControllerBase
     }
 
     [HttpGet("/conversation/{conversationId}/dialogs")]
-    public async Task<IEnumerable<ChatResponseModel>> GetDialogs([FromRoute] string conversationId, [FromQuery] int count = 100)
+    public async Task<IEnumerable<ChatResponseModel>> GetDialogs(
+        [FromRoute] string conversationId,
+        [FromQuery] int count = 100,
+        [FromQuery] string order = "asc")
     {
         var conv = _services.GetRequiredService<IConversationService>();
         await conv.SetConversationId(conversationId, [], isReadOnly: true);
-        var history = await conv.GetDialogHistory(lastCount: count, fromBreakpoint: false);
+        var history = await conv.GetDialogHistory(lastCount: count, fromBreakpoint: false, filter: new()
+        {
+            Order = order
+        });
 
         var userService = _services.GetRequiredService<IUserService>();
         var agentService = _services.GetRequiredService<IAgentService>();
@@ -143,9 +160,12 @@ public partial class ConversationController : ControllerBase
     }
 
     [HttpGet("/conversation/{conversationId}")]
-    public async Task<ConversationViewModel?> GetConversation([FromRoute] string conversationId, [FromQuery] bool isLoadStates = false)
+    public async Task<ConversationViewModel?> GetConversation(
+        [FromRoute] string conversationId,
+        [FromQuery] bool isLoadStates = false,
+        [FromQuery] bool isLoadThumbnail = false)
     {
-        var service = _services.GetRequiredService<IConversationService>();
+        var convService = _services.GetRequiredService<IConversationService>();
         var userService = _services.GetRequiredService<IUserService>();
         var settings = _services.GetRequiredService<PluginSettings>();
 
@@ -158,13 +178,15 @@ public partial class ConversationController : ControllerBase
             IsLoadLatestStates = isLoadStates
         };
 
-        var conversations = await service.GetConversations(filter);
-        var conv = !conversations.Items.IsNullOrEmpty()
-                ? ConversationViewModel.FromSession(conversations.Items.First())
-                : new();
+        var conversations = await convService.GetConversations(filter);
+        var conversation = conversations.Items?.FirstOrDefault();
+        if (conversation == null)
+        {
+            return new();
+        }
 
-        user = !string.IsNullOrEmpty(conv?.User?.Id)
-                ? await userService.GetUser(conv.User.Id)
+        user = !string.IsNullOrEmpty(conversation.UserId)
+                ? await userService.GetUser(conversation.UserId)
                 : null;
 
         if (user == null)
@@ -180,9 +202,21 @@ public partial class ConversationController : ControllerBase
             };
         }
 
-        conv.User = UserViewModel.FromUser(user);
-        conv.IsRealtimeEnabled = settings?.Assemblies?.Contains("BotSharp.Core.Realtime") ?? false;
-        return conv;
+        var conversationView = ConversationViewModel.FromSession(conversation);
+        conversationView.User = UserViewModel.FromUser(user);
+        conversationView.IsRealtimeEnabled = settings?.Assemblies?.Contains("BotSharp.Core.Realtime") ?? false;
+
+        if (isLoadThumbnail)
+        {
+            var db = _services.GetRequiredService<IBotSharpRepository>();
+            var files = await db.GetConversationFiles(new ConversationFileFilter
+            {
+                ConversationIds = [conversation.Id]
+            });
+            conversationView.Thumbnail = files?.FirstOrDefault()?.Thumbnail;
+        }
+
+        return conversationView;
     }
 
     [HttpPost("/conversation/summary")]
@@ -211,8 +245,8 @@ public partial class ConversationController : ControllerBase
             return false;
         }
 
-        var response = await conv.UpdateConversationTitle(conversationId, newTile.NewTitle);
-        return response != null;
+        await conv.UpdateConversationTitle(conversationId, newTile.NewTitle);
+        return true;
     }
 
     [HttpPut("/conversation/{conversationId}/update-title-alias")]

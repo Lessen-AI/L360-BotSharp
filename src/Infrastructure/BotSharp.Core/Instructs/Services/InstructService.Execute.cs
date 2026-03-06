@@ -1,13 +1,16 @@
 using BotSharp.Abstraction.Coding;
 using BotSharp.Abstraction.Coding.Contexts;
 using BotSharp.Abstraction.Coding.Enums;
+using BotSharp.Abstraction.Coding.Utils;
 using BotSharp.Abstraction.Files.Options;
 using BotSharp.Abstraction.Files.Proccessors;
 using BotSharp.Abstraction.Instructs;
+using BotSharp.Abstraction.Instructs.Enums;
 using BotSharp.Abstraction.Instructs.Models;
 using BotSharp.Abstraction.Instructs.Options;
 using BotSharp.Abstraction.MLTasks;
 using BotSharp.Abstraction.Models;
+using BotSharp.Abstraction.Shared;
 
 namespace BotSharp.Core.Instructs;
 
@@ -20,7 +23,8 @@ public partial class InstructService
         string? templateName = null,
         IEnumerable<InstructFileModel>? files = null,
         CodeInstructOptions? codeOptions = null,
-        FileInstructOptions? fileOptions = null)
+        FileInstructOptions? fileOptions = null,
+        ResponseFormatType? responseFormat = null)
     {
         var agentService = _services.GetRequiredService<IAgentService>();
         var agent = await agentService.LoadAgent(agentId);
@@ -51,7 +55,7 @@ public partial class InstructService
             return codeResponse;
         }
 
-        response = await RunLlm(agent, message, instruction, templateName, files, fileOptions);
+        response = await RunLlm(agent, message, instruction, templateName, files, fileOptions, responseFormat);
         return response;
     }
 
@@ -156,7 +160,7 @@ public partial class InstructService
         }
 
         // Run code script
-        var (useLock, useProcess, timeoutSeconds) = GetCodeExecutionConfig(codingSettings);
+        var (useLock, useProcess, timeoutSeconds) = CodingUtil.GetCodeExecutionConfig(codingSettings);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         var codeResponse = codeProcessor.Run(context.CodeScript?.Content ?? string.Empty, options: new()
         {
@@ -204,7 +208,8 @@ public partial class InstructService
         string? instruction,
         string? templateName,
         IEnumerable<InstructFileModel>? files = null,
-        FileInstructOptions? fileOptions = null)
+        FileInstructOptions? fileOptions = null,
+        ResponseFormatType? responseFormat = null)
     {
         var agentService = _services.GetRequiredService<IAgentService>();
         var state = _services.GetRequiredService<IConversationStateService>();
@@ -289,6 +294,14 @@ public partial class InstructService
             {
                 result = await GetChatCompletion(chatCompleter, agent, instruction, prompt, message.MessageId, files);
             }
+
+            // Repair JSON format if needed
+            responseFormat ??= agentService.GetTemplateResponseFormat(agent, templateName);
+            if (responseFormat == ResponseFormatType.Json)
+            {
+                var jsonRepairService = _services.GetRequiredService<IJsonRepairService>();
+                result = await jsonRepairService.RepairAsync(result);
+            }
             response.Text = result;
         }
 
@@ -349,21 +362,5 @@ public partial class InstructService
         });
 
         return result.Content;
-    }
-
-    /// <summary>
-    /// Returns (useLock, useProcess, timeoutSeconds)
-    /// </summary>
-    /// <returns></returns>
-    private (bool, bool, int) GetCodeExecutionConfig(CodingSettings settings)
-    {
-        var codeExecution = settings.CodeExecution;
-        var defaultTimeoutSeconds = 3;
-
-        var useLock = codeExecution?.UseLock ?? false;
-        var useProcess = codeExecution?.UseProcess ?? false;
-        var timeoutSeconds = codeExecution?.TimeoutSeconds > 0 ? codeExecution.TimeoutSeconds : defaultTimeoutSeconds;
-
-        return (useLock, useProcess, timeoutSeconds);
     }
 }
