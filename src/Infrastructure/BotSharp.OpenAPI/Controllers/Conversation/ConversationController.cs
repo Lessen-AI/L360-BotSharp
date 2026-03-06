@@ -38,7 +38,8 @@ public partial class ConversationController : ControllerBase
             AgentId = agentId,
             Channel = channel == default ? ConversationChannel.OpenAPI : channel.Value.ToString(),
             Tags = config.Tags ?? new(),
-            TaskId = config.TaskId
+            TaskId = config.TaskId,
+            States = config.States.ToDictionary(x => x.Key, x => x.Value.ToString())
         };
         conv = await service.NewConversation(conv);
         await service.SetConversationId(conv.Id, config.States);
@@ -466,7 +467,7 @@ public partial class ConversationController : ControllerBase
                 response.Instruction = msg.Instruction;
                 response.Data = msg.Data;
                 response.States = state.GetStates();
-                
+
                 await OnChunkReceived(Response, response);
             });
 

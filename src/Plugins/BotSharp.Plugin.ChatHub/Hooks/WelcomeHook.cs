@@ -45,10 +45,21 @@ public class WelcomeHook : ConversationHookBase
             // Render template
             var templating = _services.GetRequiredService<ITemplateRender>();
             var user = _services.GetRequiredService<IUserIdentity>();
-            var content = templating.Render(welcomeTemplate.Content, new Dictionary<string, object>
+
+            var defaultStates = new Dictionary<string, object>
             {
                 { "user",  user }
-            });
+            };
+
+            if (conversation.States != null && conversation.States.Any())
+            {
+                foreach (var item in conversation.States)
+                {
+                    defaultStates[item.Key] = item.Value;
+                }
+            }
+
+            var content = templating.Render(welcomeTemplate.Content, defaultStates);
             var richContentService = _services.GetRequiredService<IRichContentService>();
             var messages = richContentService.ConvertToMessages(content);
             var guid = Guid.NewGuid().ToString();
