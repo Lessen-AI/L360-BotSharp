@@ -123,6 +123,7 @@ public partial class MongoRepository
         }
 
         var dialogFilter = Builders<ConversationDialogDocument>.Filter.Eq(x => x.ConversationId, conversationId);
+        dialogFilter = WithTenant(dialogFilter);
         var foundDialog = await _dc.ConversationDialogs.Find(dialogFilter).FirstOrDefaultAsync();
         if (foundDialog == null)
         {
