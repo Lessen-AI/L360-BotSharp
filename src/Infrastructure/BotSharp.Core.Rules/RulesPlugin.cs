@@ -1,4 +1,7 @@
+using BotSharp.Core.Rules.Actions;
+using BotSharp.Core.Rules.Conditions;
 using BotSharp.Core.Rules.Engines;
+using BotSharp.Core.Rules.Root;
 
 namespace BotSharp.Core.Rules;
 
@@ -16,6 +19,28 @@ public class RulesPlugin : IBotSharpPlugin
 
     public void RegisterDI(IServiceCollection services, IConfiguration config)
     {
+        // Register rule engine
         services.AddScoped<IRuleEngine, RuleEngine>();
+
+        // Register root and end nodes
+        services.AddScoped<IRuleRoot, StartAction>();
+        services.AddScoped<IRuleAction, StartAction>();
+        services.AddScoped<IRuleEnd, EndAction>();
+        services.AddScoped<IRuleAction, EndAction>();
+
+        // Register rule actions
+        services.AddScoped<IRuleAction, ChatAction>();
+        services.AddScoped<IRuleAction, HttpRequestAction>();
+        services.AddScoped<IRuleAction, ToolCallAction>();
+
+        // Register rule conditions
+        services.AddScoped<IRuleCondition, LoopingCondition>();
+        services.AddScoped<IRuleCondition, AllVisitedRuleCondition>();
+        services.AddScoped<IRuleCondition, LogicGateCondition>();
+
+#if DEBUG
+        // Register rule trigger
+        services.AddScoped<IRuleTrigger, DemoRuleTrigger>();
+#endif
     }
 }

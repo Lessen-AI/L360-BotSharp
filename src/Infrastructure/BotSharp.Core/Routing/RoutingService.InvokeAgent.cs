@@ -38,13 +38,14 @@ public partial class RoutingService
 
         RoleDialogModel response;
         var message = dialogs.Last();
+        var conversationDialogs = dialogs.Where(x => !x.ExcludeFromContext).ToList();
         if (options?.UseStream == true)
         {
-            response = await chatCompletion.GetChatCompletionsStreamingAsync(agent, dialogs);
+            response = await chatCompletion.GetChatCompletionsStreamingAsync(agent, conversationDialogs);
         }
         else
         {
-            response = await chatCompletion.GetChatCompletions(agent, dialogs);
+            response = await chatCompletion.GetChatCompletions(agent, conversationDialogs);
         }
 
         if (response.Role == AgentRole.Function && !string.IsNullOrEmpty(response.FunctionName))
@@ -54,6 +55,7 @@ public partial class RoutingService
             message.ToolCallId = response.ToolCallId;
             message.FunctionName = response.FunctionName;
             message.FunctionArgs = response.FunctionArgs;
+            message.Thought = response.Thought != null ? new(response.Thought) : null;
             message.MetaData = response.MetaData != null ? new(response.MetaData) : null;
             message.Indication = response.Indication;
             message.CurrentAgentId = agent.Id;
@@ -73,6 +75,7 @@ public partial class RoutingService
 
             message = RoleDialogModel.From(message, role: AgentRole.Assistant, content: response.Content);
             message.CurrentAgentId = agent.Id;
+            message.Thought = response.Thought != null ? new(response.Thought) : null;
             message.MetaData = response.MetaData != null ? new(response.MetaData) : null;
             message.IsStreaming = response.IsStreaming;
             message.MessageLabel = response.MessageLabel;

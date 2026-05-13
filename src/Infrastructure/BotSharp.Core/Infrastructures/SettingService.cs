@@ -46,8 +46,21 @@ public class SettingService : ISettingService
         {
             return string.Empty;
         }
-        value = value.Substring(0, value.Length / 2 - 1) 
-            + string.Join("", Enumerable.Repeat("*", value.Length / 2));
-        return value;
+        int keepLength = (value.Length - 1) / 2;
+        return value.Substring(0, keepLength) 
+            + string.Join("", Enumerable.Repeat("*", value.Length - keepLength));
+    }
+
+    public string GetUpgradeModel(string oldModelName)
+    {
+        var modelUpgradeMapSettings = _services.GetRequiredService<ModelUpgradeMapSettings>();
+        var mapping = modelUpgradeMapSettings.ModelUpgradeMap.FirstOrDefault(x => x.OldModel.Equals(oldModelName, StringComparison.OrdinalIgnoreCase));
+        
+        if(mapping == null || !mapping.Enable)
+        {
+            return oldModelName;
+        }
+
+        return mapping.NewModel;
     }
 }

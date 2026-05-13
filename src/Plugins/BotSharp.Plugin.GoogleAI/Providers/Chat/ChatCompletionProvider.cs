@@ -3,6 +3,7 @@ using BotSharp.Abstraction.Files.Models;
 using BotSharp.Abstraction.Files.Utilities;
 using BotSharp.Abstraction.Hooks;
 using BotSharp.Abstraction.MessageHub.Models;
+using BotSharp.Abstraction.MLTasks.Settings;
 using BotSharp.Core.Infrastructures.Streams;
 using BotSharp.Core.MessageHub;
 using GenerativeAI;
@@ -16,6 +17,9 @@ public class ChatCompletionProvider : IChatCompletion
 {
     private readonly IServiceProvider _services;
     private readonly ILogger<ChatCompletionProvider> _logger;
+    private readonly IConversationStateService _state;
+    private readonly IFileStorageService _fileStorage;
+
     private List<string> renderedInstructions = [];
 
     private string _model;
@@ -28,11 +32,15 @@ public class ChatCompletionProvider : IChatCompletion
     public ChatCompletionProvider(
         IServiceProvider services,
         GoogleAiSettings googleSettings,
-        ILogger<ChatCompletionProvider> logger)
+        ILogger<ChatCompletionProvider> logger,
+        IConversationStateService state,
+        IFileStorageService fileStorage)
     {
         _settings = googleSettings;
         _services = services;
         _logger = logger;
+        _state = state;
+        _fileStorage = fileStorage;
     }
 
     public async Task<RoleDialogModel> GetChatCompletions(Agent agent, List<RoleDialogModel> conversations)
@@ -51,13 +59,19 @@ public class ChatCompletionProvider : IChatCompletion
 
         var response = await aiModel.GenerateContentAsync(request);
         var candidate = response.Candidates?.First();
-        var part = candidate?.Content?.Parts?.FirstOrDefault();
-        var text = part?.Text ?? string.Empty;
+        var parts = candidate?.Content?.Parts;
+        var textPart = parts?.FirstOrDefault(x => x.Thought != true && x.FunctionCall == null);
+        var functionPart = parts?.FirstOrDefault(x => x.FunctionCall != null);
+        var thoughtPart = parts?.FirstOrDefault(x => x.Thought == true);
+
+        var part = textPart ?? functionPart ?? thoughtPart ?? parts?.FirstOrDefault();
+        var text = textPart?.Text ?? part?.Text ?? string.Empty;
+        var thoughtSignature = thoughtPart?.ThoughtSignature ?? part?.ThoughtSignature;
 
         RoleDialogModel responseMessage;
-        if (response.GetFunction() != null)
+        if (functionPart?.FunctionCall != null)
         {
-            var toolCall = response.GetFunction();
+            var toolCall = functionPart.FunctionCall;
             responseMessage = new RoleDialogModel(AgentRole.Function, text)
             {
                 CurrentAgentId = agent.Id,
@@ -65,9 +79,9 @@ public class ChatCompletionProvider : IChatCompletion
                 ToolCallId = toolCall?.Id,
                 FunctionName = toolCall?.Name,
                 FunctionArgs = toolCall?.Args?.ToJsonString(),
-                MetaData = new Dictionary<string, string?>
+                Thought = new Dictionary<string, string?>
                 {
-                    [Constants.ThoughtSignature] = part?.ThoughtSignature
+                    [Constants.ThoughtSignature] = thoughtSignature
                 },
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
@@ -89,12 +103,18 @@ public class ChatCompletionProvider : IChatCompletion
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
-                MetaData = new Dictionary<string, string?>
+                Thought = new Dictionary<string, string?>
                 {
-                    [Constants.ThoughtSignature] = part?.ThoughtSignature
+                    [Constants.ThoughtSignature] = thoughtSignature
                 },
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
+        }
+
+        if (thoughtPart != null)
+        {
+            responseMessage.Thought ??= [];
+            responseMessage.Thought[Constants.ThinkingText] = thoughtPart.Text;
         }
 
         // After chat completion hook
@@ -130,18 +150,29 @@ public class ChatCompletionProvider : IChatCompletion
         var response = await chatClient.GenerateContentAsync(messages);
 
         var candidate = response.Candidates?.First();
-        var part = candidate?.Content?.Parts?.FirstOrDefault();
-        var text = part?.Text ?? string.Empty;
+        var parts = candidate?.Content?.Parts;
+        var textPart = parts?.FirstOrDefault(x => x.Thought != true && x.FunctionCall == null);
+        var functionPart = parts?.FirstOrDefault(x => x.FunctionCall != null);
+        var thoughtPart = parts?.FirstOrDefault(x => x.Thought == true);
+
+        var part = textPart ?? functionPart ?? thoughtPart ?? parts?.FirstOrDefault();
+        var text = textPart?.Text ?? part?.Text ?? string.Empty;
+        var thoughtSignature = thoughtPart?.ThoughtSignature ?? part?.ThoughtSignature;
 
         var msg = new RoleDialogModel(AgentRole.Assistant, text)
         {
             CurrentAgentId = agent.Id,
-            MetaData = new Dictionary<string, string?>
+            Thought = new Dictionary<string, string?>
             {
-                [Constants.ThoughtSignature] = part?.ThoughtSignature
+                [Constants.ThoughtSignature] = thoughtSignature
             },
             RenderedInstruction = string.Join("\r\n", renderedInstructions)
         };
+
+        if (thoughtPart != null)
+        {
+            msg.Thought[Constants.ThinkingText] = thoughtPart.Text;
+        }
 
         // After chat completion hook
         foreach (var hook in hooks)
@@ -156,9 +187,9 @@ public class ChatCompletionProvider : IChatCompletion
             });
         }
 
-        if (response.GetFunction() != null)
+        if (functionPart?.FunctionCall != null)
         {
-            var toolCall = response.GetFunction();
+            var toolCall = functionPart.FunctionCall;
             _logger.LogInformation($"[{agent.Name}]: {toolCall?.Name}({toolCall?.Args?.ToJsonString()})");
 
             var funcContextIn = new RoleDialogModel(AgentRole.Function, text)
@@ -168,9 +199,9 @@ public class ChatCompletionProvider : IChatCompletion
                 ToolCallId = toolCall?.Id,
                 FunctionName = toolCall?.Name,
                 FunctionArgs = toolCall?.Args?.ToJsonString(),
-                MetaData = new Dictionary<string, string?>
+                Thought = new Dictionary<string, string?>
                 {
-                    [Constants.ThoughtSignature] = part?.ThoughtSignature
+                    [Constants.ThoughtSignature] = thoughtSignature
                 },
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
@@ -190,9 +221,9 @@ public class ChatCompletionProvider : IChatCompletion
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
                 StopCompletion = true,
-                MetaData = new Dictionary<string, string?>
+                Thought = new Dictionary<string, string?>
                 {
-                    [Constants.ThoughtSignature] = part?.ThoughtSignature
+                    [Constants.ThoughtSignature] = thoughtSignature
                 },
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
@@ -236,6 +267,7 @@ public class ChatCompletionProvider : IChatCompletion
         });
 
         using var textStream = new RealtimeTextStream();
+        using var thinkingStream = new RealtimeTextStream();
         ChatThoughtModel? thoughtModel = null;
         UsageMetadata? tokenUsage = null;
 
@@ -245,99 +277,157 @@ public class ChatCompletionProvider : IChatCompletion
             MessageId = messageId
         };
 
-        await foreach (var response in chatClient.StreamContentAsync(request))
+        var streamingCancellation = _services.GetRequiredService<IConversationCancellationService>();
+        var cancellationToken = streamingCancellation.GetToken(conv.ConversationId);
+
+        try
         {
-            var candidate = response?.Candidates?.FirstOrDefault();
-            if (candidate == null)
+            await foreach (var response in chatClient.StreamContentAsync(request, cancellationToken))
             {
-                continue;
-            }
-
-            var part = candidate?.Content?.Parts?.FirstOrDefault();
-            thoughtModel = part?.FunctionCall != null
-                ? new() { ToolCall = part.FunctionCall, ThoughtSignature = part.ThoughtSignature }
-                : thoughtModel;
-
-            if (!string.IsNullOrEmpty(part?.Text))
-            {
-                var text = part.Text;
-                textStream.Collect(text);
-
-                hub.Push(new()
+                var candidate = response?.Candidates?.FirstOrDefault();
+                if (candidate == null)
                 {
-                    EventName = ChatEvent.OnReceiveLlmStreamMessage,
-                    RefId = conv.ConversationId,
-                    Data = new RoleDialogModel(AgentRole.Assistant, text)
-                    {
-                        CurrentAgentId = agent.Id,
-                        MessageId = messageId
-                    }
-                });
-            }
-
-            if (candidate!.FinishReason == FinishReason.STOP)
-            {
-                var thought = part?.FunctionCall != null
-                    ? new() { ToolCall = part.FunctionCall, ThoughtSignature = part.ThoughtSignature }
-                    : thoughtModel;
-                var functionCall = thought?.ToolCall;
-
-                if (functionCall != null)
-                {
-                    responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
-                    {
-                        CurrentAgentId = agent.Id,
-                        MessageId = messageId,
-                        ToolCallId = functionCall.Id,
-                        FunctionName = functionCall.Name,
-                        FunctionArgs = functionCall.Args?.ToJsonString(),
-                        MetaData = new Dictionary<string, string?>
-                        {
-                            [Constants.ThoughtSignature] = thought?.ThoughtSignature
-                        }
-                    };
-
-#if DEBUG
-                    _logger.LogDebug($"Tool Call (id: {functionCall.Id}) => {functionCall.Name}({functionCall.Args})");
-#endif
+                    continue;
                 }
-                else
-                {
-                    var allText = textStream.GetText();
-#if DEBUG
-                    _logger.LogDebug($"Stream text Content: {allText}");
-#endif
 
-                    responseMessage = new RoleDialogModel(AgentRole.Assistant, allText)
+                var parts = candidate?.Content?.Parts;
+                var textPart = parts?.FirstOrDefault(x => x.Thought != true && x.FunctionCall == null);
+                var functionPart = parts?.FirstOrDefault(x => x.FunctionCall != null);
+                var thoughtPart = parts?.FirstOrDefault(x => x.Thought == true);
+
+                var part = textPart ?? functionPart ?? thoughtPart ?? parts?.FirstOrDefault();
+
+                thoughtModel = functionPart?.FunctionCall != null
+                    ? new() { ToolCall = functionPart.FunctionCall, ThoughtSignature = functionPart.ThoughtSignature }
+                    : thoughtModel;
+
+                // Collect thinking text separately
+                if (!string.IsNullOrEmpty(thoughtPart?.Text))
+                {
+                    var text = thoughtPart.Text;
+                    thinkingStream.Collect(text);
+                    hub.Push(new()
+                    {
+                        EventName = ChatEvent.OnReceiveLlmStreamMessage,
+                        RefId = conv.ConversationId,
+                        Data = new RoleDialogModel(AgentRole.Assistant, string.Empty)
+                        {
+                            CurrentAgentId = agent.Id,
+                            MessageId = messageId,
+                            Thought = new()
+                            {
+                                [Constants.ThinkingText] = text
+                            }
+                        }
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(textPart?.Text))
+                {
+                    var text = textPart.Text;
+                    textStream.Collect(text);
+
+                    hub.Push(new()
+                    {
+                        EventName = ChatEvent.OnReceiveLlmStreamMessage,
+                        RefId = conv.ConversationId,
+                        Data = new RoleDialogModel(AgentRole.Assistant, text)
+                        {
+                            CurrentAgentId = agent.Id,
+                            MessageId = messageId
+                        }
+                    });
+                }
+
+                if (candidate!.FinishReason == FinishReason.STOP)
+                {
+                    var thought = functionPart?.FunctionCall != null
+                        ? new() { ToolCall = functionPart.FunctionCall, ThoughtSignature = functionPart.ThoughtSignature }
+                        : thoughtModel;
+                    var functionCall = thought?.ToolCall;
+                    var thoughtSignature = thoughtPart?.ThoughtSignature ?? part?.ThoughtSignature;
+
+                    if (functionCall != null)
+                    {
+                        responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
+                        {
+                            CurrentAgentId = agent.Id,
+                            MessageId = messageId,
+                            ToolCallId = functionCall.Id,
+                            FunctionName = functionCall.Name,
+                            FunctionArgs = functionCall.Args?.ToJsonString(),
+                            Thought = new Dictionary<string, string?>
+                            {
+                                [Constants.ThoughtSignature] = thought?.ThoughtSignature
+                            }
+                        };
+
+    #if DEBUG
+                        _logger.LogDebug($"Tool Call (id: {functionCall.Id}) => {functionCall.Name}({functionCall.Args})");
+    #endif
+                    }
+                    else
+                    {
+                        var allText = textStream.GetText();
+    #if DEBUG
+                        _logger.LogDebug($"Stream text Content: {allText}");
+    #endif
+
+                        responseMessage = new RoleDialogModel(AgentRole.Assistant, allText)
+                        {
+                            CurrentAgentId = agent.Id,
+                            MessageId = messageId,
+                            IsStreaming = true,
+                            Thought = new Dictionary<string, string?>
+                            {
+                                [Constants.ThoughtSignature] = thoughtSignature
+                            }
+                        };
+                    }
+
+                    tokenUsage = response?.UsageMetadata;
+                }
+                else if (candidate.FinishReason.HasValue)
+                {
+                    var text = candidate.FinishMessage ?? candidate.FinishReason.Value.ToString();
+                    responseMessage = new RoleDialogModel(AgentRole.Assistant, text)
                     {
                         CurrentAgentId = agent.Id,
                         MessageId = messageId,
                         IsStreaming = true,
-                        MetaData = new Dictionary<string, string?>
+                        Thought = new Dictionary<string, string?>
                         {
                             [Constants.ThoughtSignature] = part?.ThoughtSignature
                         }
                     };
+
+                    tokenUsage = response?.UsageMetadata;
                 }
-
-                tokenUsage = response?.UsageMetadata;
             }
-            else if (candidate.FinishReason.HasValue)
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("Streaming was cancelled for conversation {ConversationId}", conv.ConversationId);
+        }
+
+        // Build responseMessage from collected text when cancelled before FinishReason
+        if (cancellationToken.IsCancellationRequested && string.IsNullOrEmpty(responseMessage.Content))
+        {
+            var allText = textStream.GetText();
+            responseMessage = new RoleDialogModel(AgentRole.Assistant, allText)
             {
-                var text = candidate.FinishMessage ?? candidate.FinishReason.Value.ToString();
-                responseMessage = new RoleDialogModel(AgentRole.Assistant, text)
-                {
-                    CurrentAgentId = agent.Id,
-                    MessageId = messageId,
-                    IsStreaming = true,
-                    MetaData = new Dictionary<string, string?>
-                    {
-                        [Constants.ThoughtSignature] = part?.ThoughtSignature
-                    }
-                };
+                CurrentAgentId = agent.Id,
+                MessageId = messageId,
+                IsStreaming = true
+            };
+        }
 
-                tokenUsage = response?.UsageMetadata;
-            }
+        // Set thinking text in thought and metadata
+        var thinkingText = thinkingStream.GetText();
+        if (!string.IsNullOrEmpty(thinkingText))
+        {
+            responseMessage.Thought ??= [];
+            responseMessage.Thought[Constants.ThinkingText] = thinkingText;
         }
 
         hub.Push(new()
@@ -372,7 +462,6 @@ public class ChatCompletionProvider : IChatCompletion
     {
         var agentService = _services.GetRequiredService<IAgentService>();
         var googleSettings = _services.GetRequiredService<GoogleAiSettings>();
-        var fileStorage = _services.GetRequiredService<IFileStorageService>();
         var settingsService = _services.GetRequiredService<ILlmProviderService>();
         var settings = settingsService.GetSetting(Provider, _model);
         var allowMultiModal = settings != null && settings.MultiModal;
@@ -442,7 +531,7 @@ public class ChatCompletionProvider : IChatCompletion
                 contents.Add(new Content([
                     new Part()
                     {
-                        ThoughtSignature = message.MetaData?.GetValueOrDefault(Constants.ThoughtSignature, null),
+                        ThoughtSignature = message.Thought?.GetValueOrDefault(Constants.ThoughtSignature, null),
                         FunctionCall = new FunctionCall
                         {
                             Id = message.ToolCallId,
@@ -455,7 +544,7 @@ public class ChatCompletionProvider : IChatCompletion
                 contents.Add(new Content([
                     new Part()
                     {
-                        ThoughtSignature = message.MetaData?.GetValueOrDefault(Constants.ThoughtSignature, null),
+                        ThoughtSignature = message.Thought?.GetValueOrDefault(Constants.ThoughtSignature, null),
                         FunctionResponse = new FunctionResponse
                         {
                             Id = message.ToolCallId,
@@ -478,7 +567,7 @@ public class ChatCompletionProvider : IChatCompletion
                     new()
                     {
                         Text = text,
-                        ThoughtSignature = message.MetaData?.GetValueOrDefault(Constants.ThoughtSignature, null)
+                        ThoughtSignature = message.Thought?.GetValueOrDefault(Constants.ThoughtSignature, null)
                     }
                 };
 
@@ -497,7 +586,7 @@ public class ChatCompletionProvider : IChatCompletion
                     new()
                     {
                         Text = text,
-                        ThoughtSignature = message.MetaData?.GetValueOrDefault(Constants.ThoughtSignature, null)
+                        ThoughtSignature = message.Thought?.GetValueOrDefault(Constants.ThoughtSignature, null)
                     }
                 };
 
@@ -516,6 +605,8 @@ public class ChatCompletionProvider : IChatCompletion
         var maxTokens = int.TryParse(state.GetState("max_tokens"), out var tokens)
                             ? tokens
                             : agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
+
+        var thinkingLevel = ParseThinking(settings?.Reasoning, agent);
         var request = new GenerateContentRequest
         {
             SystemInstruction = !systemPrompts.IsNullOrEmpty() ? new Content(systemPrompts[0], AgentRole.System) : null,
@@ -524,7 +615,12 @@ public class ChatCompletionProvider : IChatCompletion
             GenerationConfig = new()
             {
                 Temperature = temperature,
-                MaxOutputTokens = maxTokens
+                MaxOutputTokens = maxTokens,
+                ThinkingConfig = thinkingLevel.HasValue ? new()
+                {
+                    IncludeThoughts = true,
+                    ThinkingLevel = thinkingLevel
+                } : null
             }
         };
 
@@ -534,8 +630,6 @@ public class ChatCompletionProvider : IChatCompletion
 
     private void CollectMessageContentParts(List<Part> contentParts, List<BotSharpFile> files)
     {
-        var fileStorage = _services.GetRequiredService<IFileStorageService>();
-
         foreach (var file in files)
         {
             if (!string.IsNullOrEmpty(file.FileData))
@@ -553,7 +647,7 @@ public class ChatCompletionProvider : IChatCompletion
             else if (!string.IsNullOrEmpty(file.FileStorageUrl))
             {
                 var contentType = FileUtility.GetFileContentType(file.FileStorageUrl);
-                var binary = fileStorage.GetFileBytes(file.FileStorageUrl);
+                var binary = _fileStorage.GetFileBytes(file.FileStorageUrl);
                 contentParts.Add(new Part()
                 {
                     InlineData = new()
@@ -596,4 +690,52 @@ public class ChatCompletionProvider : IChatCompletion
 
         return prompt;
     }
+
+    #region Thinking level
+    private ThinkingLevel? ParseThinking(ReasoningSetting? settings, Agent agent)
+    {
+        var level = _state.GetState("thyinking_level");
+
+        if (string.IsNullOrEmpty(level) && _model == agent?.LlmConfig?.Model)
+        {
+            level = agent?.LlmConfig?.ReasoningEffortLevel;
+        }
+
+        if (string.IsNullOrEmpty(level))
+        {
+            level = settings?.EffortLevel;
+            if (settings?.Parameters != null
+                && settings.Parameters.TryGetValue("EffortLevel", out var settingValue)
+                && !string.IsNullOrEmpty(settingValue?.Default))
+            {
+                level = settingValue.Default;
+            }
+        }
+
+        var thinkingLevel = ParseThinkingLevel(level);
+        return thinkingLevel;
+    }
+
+    private ThinkingLevel? ParseThinkingLevel(string? level)
+    {
+        if (string.IsNullOrWhiteSpace(level))
+        {
+            return null;
+        }
+
+        var parsedLevel = ThinkingLevel.LOW;
+        level = level.ToLower();
+        switch (level)
+        {
+            case "low":
+                parsedLevel = ThinkingLevel.LOW;
+                break;
+            case "high":
+                parsedLevel = ThinkingLevel.HIGH;
+                break;
+        }
+
+        return parsedLevel;
+    }
+    #endregion
 }

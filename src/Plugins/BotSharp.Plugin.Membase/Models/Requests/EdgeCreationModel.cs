@@ -8,5 +8,5 @@ public class EdgeCreationModel
     public string Type { get; set; } = null!;
     public bool Directed { get; set; } = true;
     public float? Weight { get; set; } = 1.0f;
-    public object? Properties { get; set; }
+    public Dictionary<string, object>? Properties { get; set; }
 }

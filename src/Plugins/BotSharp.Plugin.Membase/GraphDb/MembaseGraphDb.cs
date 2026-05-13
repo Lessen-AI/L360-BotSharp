@@ -1,11 +1,8 @@
-using BotSharp.Abstraction.Graph;
-using BotSharp.Abstraction.Graph.Models;
-using BotSharp.Abstraction.Graph.Options;
-using BotSharp.Abstraction.Models;
-using BotSharp.Abstraction.Options;
-using BotSharp.Abstraction.Utilities;
-using Microsoft.Extensions.Logging;
-using System.Text.Json;
+using System.Net;
+using BotSharp.Plugin.Membase.Models.Graph;
+using Polly;
+using Polly.Timeout;
+using Refit;
 
 namespace BotSharp.Plugin.Membase.GraphDb;
 
@@ -14,6 +11,8 @@ public partial class MembaseGraphDb : IGraphDb
     private readonly IServiceProvider _services;
     private readonly ILogger<MembaseGraphDb> _logger;
     private readonly IMembaseApi _membaseApi;
+
+    private const int RETRY_COUNT = 3;
 
     public MembaseGraphDb(
         IServiceProvider services,
@@ -35,14 +34,17 @@ public partial class MembaseGraphDb : IGraphDb
         }
 
         var args = options?.Arguments ?? new();
+        var argLogs = JsonSerializer.Serialize(args, BotSharpOptions.defaultJsonOptions);
 
         try
         {
-            var response = await _membaseApi.CypherQueryAsync(options.GraphId, new CypherQueryRequest
-            {
-                Query = query,
-                Parameters = args
-            });
+            var retryPolicy = BuildRetryPolicy();
+            var response = await retryPolicy.ExecuteAsync(() =>
+                _membaseApi.CypherQueryAsync(options!.GraphId, new CypherQueryRequest
+                {
+                    Query = query,
+                    Parameters = args
+                }));
 
             return new GraphQueryResult
             {
@@ -51,11 +53,120 @@ public partial class MembaseGraphDb : IGraphDb
                 Result = JsonSerializer.Serialize(response.Data)
             };
         }
+        catch (ApiException ex)
+        {
+            _logger.LogError(ex, $"Error when executing query in {Provider} graph db:\r\n{ex.Content}\r\n{query}\r\n{argLogs}");
+            throw;
+        }
         catch (Exception ex)
         {
-            var argLogs = args.Select(x => (new KeyValue(x.Key, x.Value.ConvertToString(BotSharpOptions.defaultJsonOptions))).ToString());
-            _logger.LogError(ex, $"Error when executing query in {Provider} graph db. (Query: {query}), (Argments: \r\n{string.Join("\r\n", argLogs)})");
-            return new();
+            _logger.LogError(ex, $"Error when executing query in {Provider} graph db. (Query: {query}), (Argments: \r\n{argLogs})");
+            throw;
         }
     }
+
+
+    #region Node
+    public async Task<GraphNodeModel> GetNodeAsync(string graphId, string nodeId)
+    {
+        var node = await _membaseApi.GetNodeAsync(graphId, nodeId);
+        return Node.ToGraphNodeModel(node);
+    }
+
+    public async Task<GraphNodeModel> CreateNodeAsync(string graphId, GraphNodeCreationRequest request)
+    {
+        var node = await _membaseApi.CreateNodeAsync(graphId, new NodeCreationModel
+        {
+            Id = request.Id,
+            Labels = request.Labels,
+            Properties = request.Properties,
+            Time = request.Time
+        });
+        return Node.ToGraphNodeModel(node);
+    }
+
+    public async Task<GraphNodeModel> MergeNodeAsync(string graphId, string nodeId, GraphNodeUpdateRequest request)
+    {
+        var node = await _membaseApi.MergeNodeAsync(graphId, nodeId, new NodeUpdateModel
+        {
+            Id = request.Id,
+            Labels = request.Labels,
+            Properties = request.Properties,
+            Time = request.Time
+        });
+        return Node.ToGraphNodeModel(node);
+    }
+
+    public async Task<bool> DeleteNodeAsync(string graphId, string nodeId)
+    {
+        await _membaseApi.DeleteNodeAsync(graphId, nodeId);
+        return true;
+    }
+    #endregion
+
+    #region Edge
+    public async Task<GraphEdgeModel> GetEdgeAsync(string graphId, string edgeId)
+    {
+        var edge = await _membaseApi.GetEdgeAsync(graphId, edgeId);
+        return Edge.ToGraphEdgeModel(edge);
+    }
+
+    public async Task<GraphEdgeModel> CreateEdgeAsync(string graphId, GraphEdgeCreationRequest request)
+    {
+        var edge = await _membaseApi.CreateEdgeAsync(graphId, new EdgeCreationModel
+        {
+            Id = request.Id,
+            SourceNodeId = request.SourceNodeId,
+            TargetNodeId = request.TargetNodeId,
+            Type = request.Type,
+            Directed = request.Directed,
+            Weight = request.Weight,
+            Properties = request.Properties
+        });
+        return Edge.ToGraphEdgeModel(edge);
+    }
+
+    public async Task<GraphEdgeModel> UpdateEdgeAsync(string graphId, string edgeId, GraphEdgeUpdateRequest request)
+    {
+        var edge = await _membaseApi.UpdateEdgeAsync(graphId, edgeId, new EdgeUpdateModel
+        {
+            Id = request.Id,
+            Properties = request.Properties
+        });
+        return Edge.ToGraphEdgeModel(edge);
+    }
+
+    public async Task<bool> DeleteEdgeAsync(string graphId, string edgeId)
+    {
+        await _membaseApi.DeleteEdgeAsync(graphId, edgeId);
+        return true;
+    }
+    #endregion
+
+    #region Private methods
+    private AsyncPolicy BuildRetryPolicy()
+    {
+        var settings = _services.GetRequiredService<MembaseSettings>();
+        var timeoutSeconds = (double)settings.TimeoutSecond / RETRY_COUNT;
+
+        var timeoutPolicy = Policy.TimeoutAsync(TimeSpan.FromSeconds(timeoutSeconds));
+
+        var retryPolicy = Policy
+            .Handle<HttpRequestException>()
+            .Or<TaskCanceledException>()
+            .Or<TimeoutRejectedException>()
+            .Or<ApiException>(ex => ex.StatusCode == HttpStatusCode.ServiceUnavailable || ex.StatusCode == HttpStatusCode.InternalServerError)
+            .WaitAndRetryAsync(
+                retryCount: RETRY_COUNT,
+                sleepDurationProvider: retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                onRetry: (ex, timespan, retryAttempt, _) =>
+                {
+                    _logger.LogWarning(ex,
+                        "CypherQueryAsync retry {RetryAttempt}/{MaxRetries} after {Delay}s. Exception: {Message}",
+                        retryAttempt, RETRY_COUNT, timespan.TotalSeconds, ex.Message);
+                });
+
+        return Policy.WrapAsync(retryPolicy, timeoutPolicy);
+    }
+    #endregion
 }

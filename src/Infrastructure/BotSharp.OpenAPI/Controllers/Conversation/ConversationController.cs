@@ -132,6 +132,8 @@ public partial class ConversationController : ControllerBase
                     Data = message.Data,
                     Sender = UserDto.FromUser(user),
                     Payload = message.Payload,
+                    Thought = message.Thought,
+                    MetaData = message.MetaData,
                     HasMessageFiles = files.Any(x => x.MessageId.IsEqualTo(message.MessageId) && x.FileSource == FileSource.User)
                 });
             }
@@ -147,6 +149,8 @@ public partial class ConversationController : ControllerBase
                     Text = !string.IsNullOrEmpty(message.SecondaryContent) ? message.SecondaryContent : message.Content,
                     Function = message.FunctionName,
                     Data = message.Data,
+                    Thought = message.Thought,
+                    MetaData = message.MetaData,
                     Sender = new()
                     {
                         FirstName = agent?.Name ?? "Unkown",
@@ -398,18 +402,38 @@ public partial class ConversationController : ControllerBase
         await conv.SetConversationId(conversationId, input.States);
         SetStates(conv, input);
 
+        IConversationCancellationService? convCancellation = null;
+        if (input.IsStreamingMessage)
+        {
+            convCancellation = _services.GetRequiredService<IConversationCancellationService>();
+            convCancellation.RegisterConversation(conversationId);
+        }
+
         var response = new ChatResponseModel();
-        await conv.SendMessage(agentId, inputMsg,
-            replyMessage: input.Postback,
-            async msg =>
-            {
-                response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
-                response.Function = msg.FunctionName;
-                response.MessageLabel = msg.MessageLabel;
-                response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
-                response.Instruction = msg.Instruction;
-                response.Data = msg.Data;
-            });
+        try
+        {
+            await conv.SendMessage(agentId, inputMsg,
+                replyMessage: input.Postback,
+                async msg =>
+                {
+                    response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
+                    response.Function = msg.FunctionName;
+                    response.MessageLabel = msg.MessageLabel;
+                    response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
+                    response.Instruction = msg.Instruction;
+                    response.Data = msg.Data;
+                    response.Thought = msg.Thought;
+                    response.MetaData = msg.MetaData;
+                });
+        }
+        catch (OperationCanceledException) when (input.IsStreamingMessage)
+        {
+            response.Text = string.Empty;
+        }
+        finally
+        {
+            convCancellation?.UnregisterConversation(conversationId);
+        }
 
         var state = _services.GetRequiredService<IConversationStateService>();
         response.States = state.GetStates();
@@ -456,20 +480,22 @@ public partial class ConversationController : ControllerBase
         Response.Headers.Append(Microsoft.Net.Http.Headers.HeaderNames.Connection, "keep-alive");
 
         await conv.SendMessage(agentId, inputMsg,
-            replyMessage: input.Postback,
-            // responsed generated
-            async msg =>
-            {
-                response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
-                response.MessageLabel = msg.MessageLabel;
-                response.Function = msg.FunctionName;
-                response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
-                response.Instruction = msg.Instruction;
-                response.Data = msg.Data;
-                response.States = state.GetStates();
+                replyMessage: input.Postback,
+                // responsed generated
+                async msg =>
+                {
+                    response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
+                    response.MessageLabel = msg.MessageLabel;
+                    response.Function = msg.FunctionName;
+                    response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
+                    response.Instruction = msg.Instruction;
+                    response.Data = msg.Data;
+                    response.Thought = msg.Thought;
+                    response.MetaData = msg.MetaData;
+                    response.States = state.GetStates();
 
-                await OnChunkReceived(Response, response);
-            });
+                    await OnChunkReceived(Response, response);
+                });
 
         response.States = state.GetStates();
         response.MessageId = inputMsg.MessageId;
@@ -478,18 +504,13 @@ public partial class ConversationController : ControllerBase
         // await OnEventCompleted(Response);
     }
 
-    private async Task OnReceiveToolCallIndication(string conversationId, RoleDialogModel msg)
+    [HttpPost("/conversation/{conversationId}/stop-streaming")]
+    public ConverstionCancellationResponse StopStreaming([FromRoute] string conversationId)
     {
-        var indicator = new ChatResponseModel
-        {
-            ConversationId = conversationId,
-            MessageId = msg.MessageId,
-            Text = msg.Indication,
-            Function = "indicating",
-            Instruction = msg.Instruction,
-            States = new Dictionary<string, string>()
-        };
-        await OnChunkReceived(Response, indicator);
+        var streamingCancellation = _services.GetRequiredService<IConversationCancellationService>();
+        var cancelled = streamingCancellation.CancelStreaming(conversationId);
+
+        return new ConverstionCancellationResponse { Success = cancelled };
     }
     #endregion
 
@@ -516,6 +537,8 @@ public partial class ConversationController : ControllerBase
         {
             conv.States.SetState("sampling_factor", input.SamplingFactor, source: StateSource.External);
         }
+
+        conv.States.SetState("use_stream_message", input.IsStreamingMessage, source: StateSource.Application);
     }
 
     private FileContentResult BuildFileResult(string file)
@@ -567,6 +590,20 @@ public partial class ConversationController : ControllerBase
         }
 
         return jsonOption;
+    }
+
+    private async Task OnReceiveToolCallIndication(string conversationId, RoleDialogModel msg)
+    {
+        var indicator = new ChatResponseModel
+        {
+            ConversationId = conversationId,
+            MessageId = msg.MessageId,
+            Text = msg.Indication,
+            Function = "indicating",
+            Instruction = msg.Instruction,
+            States = []
+        };
+        await OnChunkReceived(Response, indicator);
     }
     #endregion
 }

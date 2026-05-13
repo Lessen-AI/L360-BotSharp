@@ -80,6 +80,8 @@ public class ChatHubObserver : BotSharpObserverBase<HubObserveData<RoleDialogMod
                     Function = message.FunctionName,
                     RichContent = message.SecondaryRichContent ?? message.RichContent,
                     Data = message.Data,
+                    Thought = message.Thought,
+                    MetaData = message.MetaData,
                     Sender = new()
                     {
                         FirstName = "AI",

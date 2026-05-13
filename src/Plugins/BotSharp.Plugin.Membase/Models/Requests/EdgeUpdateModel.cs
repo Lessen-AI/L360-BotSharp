@@ -2,5 +2,6 @@ namespace BotSharp.Plugin.Membase.Models;
 
 public class EdgeUpdateModel
 {
-    public object? Properties { get; set; }
+    public string? Id { get; set; }
+    public Dictionary<string, object>? Properties { get; set; }
 }

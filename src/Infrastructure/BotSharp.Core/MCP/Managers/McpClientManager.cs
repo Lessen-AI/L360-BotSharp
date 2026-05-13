@@ -22,13 +22,23 @@ public class McpClientManager : IDisposable
         {
             var settings = _services.GetRequiredService<McpSettings>();
             var config = settings.McpServerConfigs.Where(x => x.Id == serverId).FirstOrDefault();
-            if (config == null)
+            if (config == null || !config.Enabled)
             {
                 return null;
             }
 
             IClientTransport? transport = null;
-            if (config.SseConfig != null)
+            if (config.HttpConfig != null)
+            {
+                transport = new HttpClientTransport(new HttpClientTransportOptions
+                {
+                    Name = config.Name,
+                    Endpoint = new Uri(config.HttpConfig.EndPoint),
+                    AdditionalHeaders = config.HttpConfig.AdditionalHeaders,
+                    ConnectionTimeout = config.HttpConfig.ConnectionTimeout
+                });
+            }
+            else if (config.SseConfig != null)
             {
                 transport = new HttpClientTransport(new HttpClientTransportOptions
                 {
