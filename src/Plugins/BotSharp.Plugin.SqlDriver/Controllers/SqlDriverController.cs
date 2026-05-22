@@ -84,12 +84,14 @@ public class SqlDriverController : ControllerBase
     public IActionResult GetConnectionSettings()
     {
         var settings = _services.GetRequiredService<SqlDriverSetting>();
+        var hook = _services.GetRequiredService<IText2SqlHook>();
+        var conn = hook.GetConnectionString(new RoleDialogModel());
 
         var connections = settings.Connections.Select(x => new DataSourceSetting
         {
             DbType = x.DbType,
             Name = x.Name,
-            ConnectionString = "**********"
+            ConnectionString = $"{conn?.Split(';')[0]};{conn?.Split(';')[1]};*******"
         }).ToArray();
 
         return Ok(connections);
