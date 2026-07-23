@@ -30,7 +30,7 @@ public class ChatStreamMiddleware
                 try
                 {
                     var services = httpContext.RequestServices;
-                    var segments = request.Path.Value.Split("/");
+                    var segments = request.Path.Value!.Split("/");
                     var agentId = segments[segments.Length - 2];
                     var conversationId = segments[segments.Length - 1];
 
@@ -66,8 +66,10 @@ public class ChatStreamMiddleware
         // load conversation and state
         var convService = services.GetRequiredService<IConversationService>();
         var state = services.GetRequiredService<IConversationStateService>();
+        var routing = services.GetRequiredService<IRoutingService>();
         await convService.SetConversationId(conversationId, []);
         await convService.GetConversationRecordOrCreateNew(agentId);
+        await routing.Context.Push(agentId);
 
         await foreach (ChatSessionUpdate update in session.ReceiveUpdatesAsync(CancellationToken.None))
         {

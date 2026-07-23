@@ -7,7 +7,15 @@ public class EntityAnalysisOptions
     /// </summary>
     [JsonPropertyName("data_providers")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public List<string>? DataProviders { get; set; }
+    public IEnumerable<string>? DataProviders { get; set; }
+
+    /// <summary>
+    /// Free-form parameters forwarded to <see cref="IEntityDataLoader"/> implementations.
+    /// Each loader documents the keys it recognizes (e.g. "graphId" for graph-backed loaders).
+    /// </summary>
+    [JsonPropertyName("loader_parameters")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IDictionary<string, string>? LoaderParameters { get; set; }
 
     /// <summary>
     /// Maximum n-gram size

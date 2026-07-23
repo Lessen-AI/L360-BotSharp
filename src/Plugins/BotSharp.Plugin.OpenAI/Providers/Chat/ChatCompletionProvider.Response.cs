@@ -2,7 +2,6 @@
 using BotSharp.Abstraction.MessageHub.Models;
 using BotSharp.Core.Infrastructures.Streams;
 using BotSharp.Core.MessageHub;
-using OpenAI.Chat;
 using OpenAI.Responses;
 
 namespace BotSharp.Plugin.OpenAI.Providers.Chat;
@@ -425,25 +424,35 @@ public partial class ChatCompletionProvider
         var allowMultiModal = settings != null && settings.MultiModal;
         renderedInstructions = [];
 
+        float? temperature = float.Parse(_state.GetState("temperature", "0.0"));
         var maxTokens = int.TryParse(_state.GetState("max_tokens"), out var tokens)
                         ? tokens
                         : agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
 
-        var options = new CreateResponseOptions(_model, new List<ResponseItem>())
+        var options = new CreateResponseOptions(_model, [])
         {
-            MaxOutputTokenCount = maxTokens
+            Temperature = temperature,
+            MaxOutputTokenCount = maxTokens,
         };
 
-        var (_, reasoningEffortLevel) = ParseReasoning(settings?.Reasoning, agent);
-        var responseReasoningLevel = ParseResponseReasoningEffortLevel(reasoningEffortLevel?.ToString());
-        if (responseReasoningLevel.HasValue)
+        // Reasoning level
+        var reasoningEffortLevel = ParseResponseReasoning(settings?.Reasoning, agent);
+        if (reasoningEffortLevel.HasValue)
         {
             options.ReasoningOptions = new ResponseReasoningOptions
             {
-                ReasoningEffortLevel = responseReasoningLevel.Value,
+                ReasoningEffortLevel = reasoningEffortLevel.Value,
                 ReasoningSummaryVerbosity = ResponseReasoningSummaryVerbosity.Auto
             };
+
+            if (reasoningEffortLevel != ResponseReasoningEffortLevel.None)
+            {
+                options.Temperature = null;
+            }
         }
+
+        // Response format
+        SetResponseFormat(options, agent.LlmConfig);
 
         // Prepare instruction and functions
         var renderData = agentService.CollectRenderData(agent);
@@ -575,9 +584,44 @@ public partial class ChatCompletionProvider
         return sb.ToString();
     }
 
+    private static ResponseTextFormat? GetResponseTextFormat(string? format)
+    {
+        return format?.ToLower() switch
+        {
+            "json" or "json_object" => ResponseTextFormat.CreateJsonObjectFormat(),
+            "text" => ResponseTextFormat.CreateTextFormat(),
+            _ => null
+        };
+    }
+
+    private ResponseReasoningEffortLevel? ParseResponseReasoning(ReasoningSetting? settings, Agent agent)
+    {
+        ResponseReasoningEffortLevel? reasoningEffortLevel = null;
+
+        var level = _state.GetState("reasoning_effort_level");
+        if (string.IsNullOrEmpty(level) && _model == agent?.LlmConfig?.Model)
+        {
+            level = agent?.LlmConfig?.ReasoningEffortLevel;
+        }
+
+        if (string.IsNullOrEmpty(level))
+        {
+            level = settings?.EffortLevel;
+            if (settings?.Parameters != null
+                && settings.Parameters.TryGetValue("EffortLevel", out var settingValue)
+                && !string.IsNullOrEmpty(settingValue?.Default))
+            {
+                level = settingValue.Default;
+            }
+        }
+
+        reasoningEffortLevel = ParseResponseReasoningEffortLevel(level);
+        return reasoningEffortLevel;
+    }
+
     private ResponseReasoningEffortLevel? ParseResponseReasoningEffortLevel(string? level)
     {
-        if (string.IsNullOrWhiteSpace(level))
+        if (string.IsNullOrWhiteSpace(level) || level.IsEqualTo("disable"))
         {
             return null;
         }
@@ -766,6 +810,16 @@ public partial class ChatCompletionProvider
         {
             options.ToolChoice = ResponseToolChoice.CreateRequiredChoice();
         }
+    }
+
+    private void SetResponseFormat(CreateResponseOptions options, AgentLlmConfig? llmConfig)
+    {
+        var format = _state.GetState("response_format").IfNullOrEmptyAs(llmConfig?.ResponseFormat);
+        var responseFormat = GetResponseTextFormat(format);
+        options.TextOptions = responseFormat != null ? new ResponseTextOptions
+        {
+            TextFormat = responseFormat
+        } : null;
     }
     #endregion
 }

@@ -1,9 +1,8 @@
-using BotSharp.Abstraction.Hooks;
-using BotSharp.Abstraction.Models;
 using BotSharp.Abstraction.Realtime.Options;
 using BotSharp.Abstraction.Realtime.Settings;
 using BotSharp.Abstraction.Settings;
 using OpenAI.Chat;
+using static Dapper.SqlMapper;
 
 namespace BotSharp.Plugin.OpenAI.Providers.Realtime;
 
@@ -19,7 +18,7 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
     private readonly ILogger<RealTimeCompletionProvider> _logger;
     private readonly BotSharpOptions _botsharpOptions;
 
-    private string _model = Gpt4xModelConstants.GPT_4o_Mini_Realtime_Preview;
+    private string _model = "gpt-realtime";
     private LlmRealtimeSession _session;
     private RealtimeOptions? _realtimeOptions;
     private bool _isBlocking = false;
@@ -42,9 +41,6 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
         _logger = logger;
         _services = services;
         _botsharpOptions = botsharpOptions;
-
-        var settingService = _services.GetRequiredService<ISettingService>();
-        _model = settingService.GetUpgradeModel(_model);
     }
 
     public async Task Connect(
@@ -70,13 +66,10 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
         _onInputAudioTranscriptionDone = onInputAudioTranscriptionDone;
         _onInterruptionDetected = onInterruptionDetected;
 
-        var settingsService = _services.GetRequiredService<ILlmProviderService>();
         var realtimeSettings = _services.GetRequiredService<RealtimeModelSettings>();
         var settingService = _services.GetRequiredService<ISettingService>();
 
-        _model ??= settingService.GetUpgradeModel(realtimeSettings.Model);
-        var settings = settingsService.GetSetting(Provider, _model);
-
+        _model ??= realtimeSettings.Model;
         _session = new LlmRealtimeSession(_services, new ChatSessionOptions
         {
             Provider = Provider,
@@ -86,11 +79,7 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
 
         await _session.ConnectAsync(
             uri: new Uri($"wss://api.openai.com/v1/realtime?model={_model}"),
-            headers: new Dictionary<string, string>
-            {
-                {"Authorization", $"Bearer {settings.ApiKey}"},
-                {"OpenAI-Beta", "realtime=v1"}
-            },
+            headers: BuildHeaders(),
             cancellationToken: CancellationToken.None);
 
         _ = ReceiveMessage(realtimeSettings);
@@ -140,17 +129,20 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
             {
                 _logger.LogInformation($"{response.Type}: {receivedText}");
             }
-            else if (response.Type == "response.audio_transcript.delta")
+            else if (response.Type == "response.audio_transcript.delta"
+                || response.Type == "response.output_audio_transcript.delta")
             {
                 _logger.LogDebug($"{response.Type}: {receivedText}");
             }
-            else if (response.Type == "response.audio_transcript.done")
+            else if (response.Type == "response.audio_transcript.done"
+                || response.Type == "response.output_audio_transcript.done")
             {
                 _logger.LogInformation($"{response.Type}: {receivedText}");
                 var data = JsonSerializer.Deserialize<ResponseAudioTranscript>(receivedText);
                 await _onModelAudioTranscriptDone(data.Transcript);
             }
-            else if (response.Type == "response.audio.delta")
+            else if (response.Type == "response.audio.delta"
+                || response.Type == "response.output_audio.delta")
             {
                 var audio = JsonSerializer.Deserialize<ResponseAudioDelta>(receivedText);
                 if (audio?.Delta != null)
@@ -159,7 +151,8 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
                     await _onModelAudioDeltaReceived(audio.Delta, audio.ItemId);
                 }
             }
-            else if (response.Type == "response.audio.done")
+            else if (response.Type == "response.audio.done"
+                || response.Type == "response.output_audio.done")
             {
                 _logger.LogInformation($"{response.Type}: {receivedText}");
                 await _onModelAudioResponseDone();
@@ -341,32 +334,47 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
             Parameters = JsonSerializer.Deserialize<FunctionParametersDef>(x.FunctionParameters)
         }).ToArray();
 
+        var reasoningEffort = GetReasoningEffort(agent);
         var realtimeModelSettings = _services.GetRequiredService<RealtimeModelSettings>();
         var sessionUpdate = new
         {
             type = "session.update",
             session = new RealtimeSessionUpdateRequest
             {
-                InputAudioFormat = _realtimeOptions?.InputAudioFormat ?? realtimeModelSettings.InputAudioFormat,
-                OutputAudioFormat = _realtimeOptions?.OutputAudioFormat ?? realtimeModelSettings.OutputAudioFormat,
-                Voice = realtimeModelSettings.Voice,
+                Model = _model,
+                Type = "realtime",
+                OutputModalities = ["audio"],
+                MaxOutputTokens = realtimeModelSettings.MaxResponseOutputTokens,
                 Instructions = instruction,
                 ToolChoice = "auto",
                 Tools = functions,
-                Modalities = realtimeModelSettings.Modalities,
-                Temperature = Math.Max(options.Temperature ?? realtimeModelSettings.Temperature, 0.6f),
-                MaxResponseOutputTokens = realtimeModelSettings.MaxResponseOutputTokens,
-                TurnDetection = new RealtimeSessionTurnDetection
+                Audio = new RealtimeAudioConfig
                 {
-                    InterruptResponse = realtimeModelSettings.InterruptResponse/*,
-                    Threshold = realtimeModelSettings.TurnDetection.Threshold,
-                    PrefixPadding = realtimeModelSettings.TurnDetection.PrefixPadding,
-                    SilenceDuration = realtimeModelSettings.TurnDetection.SilenceDuration*/
+                    Input = new RealtimeInputAudioConfig
+                    {
+                        Format = ConvertAudioFormat(_realtimeOptions?.InputAudioFormat ?? realtimeModelSettings.InputAudioFormat),
+                        NoiseReduction = new InputAudioNoiseReduction
+                        {
+                            Type = "near_field"
+                        },
+                        TurnDetection = new RealtimeSessionTurnDetection
+                        {
+                            InterruptResponse = realtimeModelSettings.InterruptResponse
+                            //Threshold = realtimeModelSettings.TurnDetection.Threshold,
+                            //PrefixPadding = realtimeModelSettings.TurnDetection.PrefixPadding,
+                            //SilenceDuration = realtimeModelSettings.TurnDetection.SilenceDuration
+                        },
+                    },
+                    Output = new RealtimeOutputAudioConfig
+                    {
+                        Format = ConvertAudioFormat(_realtimeOptions?.OutputAudioFormat ?? realtimeModelSettings.OutputAudioFormat),
+                        Voice = realtimeModelSettings.Voice
+                    }
                 },
-                InputAudioNoiseReduction = new InputAudioNoiseReduction
+                Reasoning = !string.IsNullOrWhiteSpace(reasoningEffort) ? new RealtimeReasoningConfig
                 {
-                    Type = "near_field"
-                }
+                    Effort = reasoningEffort
+                } : null
             }
         };
 
@@ -375,9 +383,9 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
             var words = new List<string>();
             HookEmitter.Emit<IRealtimeHook>(_services, hook => words.AddRange(hook.OnModelTranscriptPrompt(agent)), agent.Id);
 
-            sessionUpdate.session.InputAudioTranscription = new InputAudioTranscription
+            sessionUpdate.session.Audio.Input.Transcription = new InputAudioTranscription
             {
-                Model = settingService.GetUpgradeModel(realtimeModelSettings.InputAudioTranscription.Model),
+                Model = realtimeModelSettings.InputAudioTranscription.Model,
                 Language = realtimeModelSettings.InputAudioTranscription.Language,
                 Prompt = string.Join(", ", words.Select(x => x.ToLower().Trim()).Distinct()).SubstringMax(1024)
             };
@@ -713,6 +721,84 @@ public class RealTimeCompletionProvider : IRealTimeCompletion
         }
 
         return prompt;
+    }
+
+    private Dictionary<string, string> BuildHeaders()
+    {
+        var llmProviderService = _services.GetRequiredService<ILlmProviderService>();
+        var settings = llmProviderService.GetSetting(Provider, _model);
+
+        var headers = new Dictionary<string, string>
+        {
+            {"Authorization", $"Bearer {settings.ApiKey}"}
+        };
+        return headers;
+    }
+
+    private RealtimeAudioFormat ConvertAudioFormat(string format)
+    {
+        var result = new RealtimeAudioFormat
+        {
+            Type = format
+        };
+
+        if (string.IsNullOrWhiteSpace(format))
+        {
+            return result;
+        }
+
+        format = format.ToLowerInvariant();
+        switch (format)
+        {
+            case "pcm16":
+                result.Type = "audio/pcm";
+                result.Rate = 24000;
+                break;
+            case "g711_ulaw":
+                result.Type = "audio/pcmu";
+                break;
+            case "g711_alaw":
+                result.Type = "audio/pcma";
+                break;
+            default:
+                break;
+        }
+
+        return result;
+    }
+
+    private string? GetReasoningEffort(Agent agent)
+    {
+        var state = _services.GetRequiredService<IConversationStateService>();
+        var reasoningEffort = state.GetState("reasoning_effort_level");
+
+        if (string.IsNullOrEmpty(reasoningEffort) && _model == agent?.LlmConfig?.Realtime?.Model)
+        {
+            reasoningEffort = agent?.LlmConfig?.Realtime?.ReasoningEffortLevel;
+        }
+
+        if (string.IsNullOrEmpty(reasoningEffort))
+        {
+            var llmProviderService = _services.GetRequiredService<ILlmProviderService>();
+            var settings = llmProviderService.GetSetting(Provider, _model)?.Reasoning;
+
+            reasoningEffort = settings?.EffortLevel;
+            if (settings?.Parameters != null
+                && settings.Parameters.TryGetValue("EffortLevel", out var settingValue)
+                && !string.IsNullOrEmpty(settingValue?.Default))
+            {
+                reasoningEffort = settingValue.Default;
+            }
+        }
+
+#if DEBUG
+        if (!string.IsNullOrEmpty(reasoningEffort))
+        {
+            _logger.LogDebug("Using reasoning effort {ReasoningEffort} for agent {AgentName}", reasoningEffort, agent?.Name);
+        }
+#endif
+
+        return reasoningEffort;
     }
     #endregion
 }

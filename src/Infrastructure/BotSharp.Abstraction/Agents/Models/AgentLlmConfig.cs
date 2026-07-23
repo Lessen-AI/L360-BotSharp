@@ -4,12 +4,13 @@ public class AgentLlmConfig
 {
     public AgentLlmConfig() { }
 
-    public AgentLlmConfig(AgentTemplateLlmConfig templateLlmConfig) 
+    public AgentLlmConfig(AgentTemplateLlmConfig templateLlmConfig)
     {
-        Provider = templateLlmConfig.Provider;
-        Model = templateLlmConfig.Model;
-        MaxOutputTokens = templateLlmConfig.MaxOutputTokens;
-        ReasoningEffortLevel = templateLlmConfig.ReasoningEffortLevel;
+        Provider = templateLlmConfig?.Provider;
+        Model = templateLlmConfig?.Model;
+        MaxOutputTokens = templateLlmConfig?.MaxOutputTokens;
+        ReasoningEffortLevel = templateLlmConfig?.ReasoningEffortLevel;
+        ResponseFormat = templateLlmConfig?.ResponseFormat;
     }
 
     /// <summary>
@@ -53,6 +54,13 @@ public class AgentLlmConfig
     public string? ReasoningEffortLevel { get; set; }
 
     /// <summary>
+    /// Response format: json, xml, markdown, yaml, etc.
+    /// </summary>
+    [JsonPropertyName("response_format")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ResponseFormat { get; set; }
+
+    /// <summary>
     /// Image composition config
     /// </summary>
     [JsonPropertyName("image_composition")]
@@ -82,6 +90,6 @@ public class LlmAudioTranscriptionConfig : LlmProviderModel
 {
 }
 
-public class LlmRealtimeConfig : LlmProviderModel
+public class LlmRealtimeConfig : LlmConfigBase
 {
 }

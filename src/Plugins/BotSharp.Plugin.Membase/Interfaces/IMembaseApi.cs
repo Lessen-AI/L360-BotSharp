@@ -45,4 +45,26 @@ public interface IMembaseApi
     [Delete("/graph/{graphId}/edge/{edgeId}")]
     Task DeleteEdgeAsync(string graphId, string edgeId);
     #endregion
+
+    #region PGT
+    [Get("/graph/{graphId}/pgt-definitions/{definitionId}")]
+    Task<PgtDefinition> GetPgtDefinitionAsync(string graphId, string definitionId);
+
+    [Post("/graph/{graphId}/pgt-definitions/{definitionId}/simulate")]
+    Task<PgtSimulationResponse> SimulatePgtDefinitionAsync(string graphId, string definitionId, [Body] PgtSimulationRequest request);
+
+    [Post("/graph/{graphId}/pgt-definitions/{definitionId}/traverse")]
+    Task<PgtTraversalResponse> TraversePgtDefinitionAsync(string graphId, string definitionId, [Body] PgtTraversalRequest request);
+
+    [Post("/graph/{graphId}/pgt-definitions/{definitionId}/validate")]
+    Task<PgtValidationResponse> ValidatePgtDefinitionAsync(string graphId, string definitionId, [Body] PgtValidationRequest request);
+
+    [Post("/graph/{graphId}/pgt-external/{correlationId}/complete")]
+    Task<PgtExternalCompleteResponse> CompletePgtExternalAsync(string graphId, string correlationId, [FromBody] object emptyBody);
+    #endregion
+
+    #region Procedure
+    [Post("/graph/{graphId}/procedures/{procedureName}/execute")]
+    Task<ProcedureExecuteResponse> ExecuteProcedureAsync(string graphId, string procedureName, [Body] ProcedureExecuteRequest? request = null);
+    #endregion
 }
