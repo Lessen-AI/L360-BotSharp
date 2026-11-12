@@ -1,3 +1,4 @@
+using BotSharp.Abstraction.Infrastructures.Enums;
 using Anthropic.SDK.Common;
 using BotSharp.Abstraction.Conversations.Enums;
 using BotSharp.Core.Infrastructures.Streams;
@@ -52,14 +53,20 @@ public class ChatCompletionProvider : IChatCompletion
 
         if (response.StopReason == StopReason.ToolUse)
         {
-            var toolCall = response.ToolCalls.FirstOrDefault();
+            // Every call the model asked for, not only the first. It routinely asks for several
+            // independent ones at once, and keeping one made it re-ask for the rest next turn.
+            var calls = response.ToolCalls
+                .Select(x => new LlmToolCall(x.Id, x.Name, x.Arguments?.ToJsonString()))
+                .ToList();
+            var toolCall = calls.FirstOrDefault();
             responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
                 ToolCallId = toolCall?.Id,
-                FunctionName = toolCall?.Name,
-                FunctionArgs = toolCall?.Arguments?.ToJsonString(),
+                FunctionName = toolCall?.FunctionName,
+                FunctionArgs = toolCall?.FunctionArgs,
+                ToolCalls = calls,
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
         }
@@ -67,7 +74,7 @@ public class ChatCompletionProvider : IChatCompletion
         {
             _logger.LogWarning($"Action: {nameof(GetChatCompletions)}, Reason: {response.StopReason}, Agent: {agent.Name}, MaxOutputTokens: {parameters.MaxTokens}, Content:{text}");
 
-            responseMessage = new RoleDialogModel(AgentRole.Assistant, $"AI response exceeded max output length")
+            responseMessage = new RoleDialogModel(AgentRole.Assistant, ProviderHelper.MaxTokensMessage)
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
@@ -126,14 +133,20 @@ public class ChatCompletionProvider : IChatCompletion
 
         if (response.StopReason == StopReason.ToolUse)
         {
-            var toolCall = response.ToolCalls.FirstOrDefault();
+            // Every call the model asked for, not only the first. It routinely asks for several
+            // independent ones at once, and keeping one made it re-ask for the rest next turn.
+            var calls = response.ToolCalls
+                .Select(x => new LlmToolCall(x.Id, x.Name, x.Arguments?.ToJsonString()))
+                .ToList();
+            var toolCall = calls.FirstOrDefault();
             responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
                 ToolCallId = toolCall?.Id,
-                FunctionName = toolCall?.Name,
-                FunctionArgs = toolCall?.Arguments?.ToJsonString(),
+                FunctionName = toolCall?.FunctionName,
+                FunctionArgs = toolCall?.FunctionArgs,
+                ToolCalls = calls,
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
 
@@ -144,7 +157,7 @@ public class ChatCompletionProvider : IChatCompletion
         {            
             _logger.LogWarning($"Action: {nameof(GetChatCompletionsAsync)}, Reason: {response.StopReason}, Agent: {agent.Name}, MaxOutputTokens: {parameters.MaxTokens}, Content:{text}");
 
-            responseMessage = new RoleDialogModel(AgentRole.Assistant, $"AI response exceeded max output length")
+            responseMessage = new RoleDialogModel(AgentRole.Assistant, ProviderHelper.MaxTokensMessage)
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
@@ -239,23 +252,31 @@ public class ChatCompletionProvider : IChatCompletion
                 {
                     if (delta.StopReason == StopReason.ToolUse)
                     {
-                        var toolCall = choice.ToolCalls.FirstOrDefault();
+                        var calls = choice.ToolCalls
+                            .Select(x => new LlmToolCall(x.Id, x.Name,
+                                x.Arguments?.ToString()?.IfNullOrEmptyAs("{}") ?? "{}"))
+                            .ToList();
+                        var toolCall = calls.FirstOrDefault();
                         responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
                         {
                             CurrentAgentId = agent.Id,
                             MessageId = messageId,
                             ToolCallId = toolCall?.Id,
-                            FunctionName = toolCall?.Name,
-                            FunctionArgs = toolCall?.Arguments?.ToString()?.IfNullOrEmptyAs("{}") ?? "{}"
+                            FunctionName = toolCall?.FunctionName,
+                            FunctionArgs = toolCall?.FunctionArgs ?? "{}",
+                            ToolCalls = calls
                         };
 
 #if DEBUG
-                        _logger.LogDebug($"Tool Call (id: {toolCall?.Id}) => {toolCall?.Name}({toolCall?.Arguments})");
+                        foreach (var call in calls)
+                        {
+                            _logger.LogDebug($"Tool Call (id: {call.Id}) => {call.FunctionName}({call.FunctionArgs})");
+                        }
 #endif
                     }
-                    else if (delta.StopReason == StopReason.EndTurn)
+                    else if (!string.IsNullOrEmpty(delta.StopReason))
                     {
-                        var allText = textStream.GetText();
+                        var allText = ProviderHelper.ResolveStreamedContent(delta.StopReason, textStream.GetText());
                         responseMessage = new RoleDialogModel(AgentRole.Assistant, allText)
                         {
                             CurrentAgentId = agent.Id,
@@ -266,15 +287,6 @@ public class ChatCompletionProvider : IChatCompletion
 #if DEBUG
                         _logger.LogDebug($"Stream text Content: {allText}");
 #endif
-                    }
-                    else if (!string.IsNullOrEmpty(delta.StopReason))
-                    {
-                        responseMessage = new RoleDialogModel(AgentRole.Assistant, delta.StopReason)
-                        {
-                            CurrentAgentId = agent.Id,
-                            MessageId = messageId,
-                            IsStreaming = true
-                        };
                     }
                     else
                     {
@@ -448,10 +460,9 @@ public class ChatCompletionProvider : IChatCompletion
             }
         }
 
-        var temperature = decimal.Parse(_state.GetState("temperature", "0.0"));
-        var maxTokens = int.TryParse(_state.GetState("max_tokens"), out var tokens)
-            ? tokens
-            : agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
+        var temperature = _state.GetState(LlmStateConst.TEMPERATURE, 0.0m);
+        var maxTokens = _state.GetState<int?>(LlmStateConst.MAX_TOKENS)
+            ?? agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
 
         parameters.Messages = messages;
         parameters.Tools = tools;
@@ -478,7 +489,7 @@ public class ChatCompletionProvider : IChatCompletion
         var thinkingType = LlmUtility.GetModelParameter(
             param,
             "ThinkingType",
-            _state.GetState("thinking_type"));
+            _state.GetState(LlmStateConst.THINKING_TYPE));
         if (thinkingType.IsEqualTo("disabled"))
         {
             return null;
@@ -494,20 +505,30 @@ public class ChatCompletionProvider : IChatCompletion
             thinking.Type = ThinkingType.enabled;
         }
 
-        var bt = _state.GetState("budget_tokens");
-        if (int.TryParse(bt, out var budgetTokens)
-            || (param.TryGetValue("BudgetTokens", out var value)
-            && int.TryParse(value.Default, out budgetTokens)))
+        var budgetTokens = _state.GetState<int?>(LlmStateConst.BUDGET_TOKENS);
+        if (budgetTokens == null
+            && param.TryGetValue("BudgetTokens", out var value)
+            && int.TryParse(value.Default, out var defaultBudgetTokens))
         {
-            thinking.BudgetTokens = budgetTokens;
+            budgetTokens = defaultBudgetTokens;
         }
 
-        var enableInterleavedThinking = _state.GetState("use_interleaved_thinking");
-        if (bool.TryParse(enableInterleavedThinking, out var useInterleavedThinking)
-            || (param.TryGetValue("UseInterleavedThinking", out value)
-            && bool.TryParse(value.Default, out useInterleavedThinking)))
+        if (budgetTokens.HasValue)
         {
-            thinking.UseInterleavedThinking = useInterleavedThinking;
+            thinking.BudgetTokens = budgetTokens.Value;
+        }
+
+        var useInterleavedThinking = _state.GetState<bool?>(LlmStateConst.USE_INTERLEAVED_THINKING);
+        if (useInterleavedThinking == null
+            && param.TryGetValue("UseInterleavedThinking", out value)
+            && bool.TryParse(value.Default, out var defaultInterleavedThinking))
+        {
+            useInterleavedThinking = defaultInterleavedThinking;
+        }
+
+        if (useInterleavedThinking.HasValue)
+        {
+            thinking.UseInterleavedThinking = useInterleavedThinking.Value;
         }
 
         return thinkingType.IsEqualTo("adaptive")
@@ -600,6 +621,19 @@ public class ChatCompletionProvider : IChatCompletion
                     {
                         MediaType = contentType,
                         Data = Convert.ToBase64String(binary)
+                    }
+                };
+                contentParts.Add(contentPart);
+            }
+            else if (!string.IsNullOrEmpty(file.FileUrl))
+            {
+                // Claude fetches a public image URL itself.
+                var contentPart = new ImageContent
+                {
+                    Source = new ImageSource
+                    {
+                        Type = SourceType.url,
+                        Url = file.FileUrl
                     }
                 };
                 contentParts.Add(contentPart);

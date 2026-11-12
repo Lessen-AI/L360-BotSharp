@@ -10,6 +10,9 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Moq" />
+    <!-- Weaves [SharpCache] onto test-only classes, so the cache key can be exercised on methods the tests define. -->
+    <PackageReference Include="Rougamo.Fody" PrivateAssets="all" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -26,7 +29,28 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\..\docs\mcp\parallel-search.json" Link="parallel-search.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\docs\mcp\sem.json" Link="sem.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\Infrastructure\BotSharp.Core\BotSharp.Core.csproj" />
+    <ProjectReference Include="..\..\src\Infrastructure\BotSharp.Core.Rules\BotSharp.Core.Rules.csproj" />
+    <!-- For the rate-limit exemption tests: the harness has to be recognised by BotSharp own volume guards. -->
+    <ProjectReference Include="..\..\src\Infrastructure\BotSharp.Logger\BotSharp.Logger.csproj" />
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.AgentTesting\BotSharp.Plugin.AgentTesting.csproj" />
+    <!-- For ChatEventDispatcherTests: chat events must never make their producer wait on a client. -->
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.ChatHub\BotSharp.Plugin.ChatHub.csproj" />
+    <!-- For SharpCacheSharedResultTests: AgentController must not mutate the cached agents it reads. -->
+    <ProjectReference Include="..\..\src\Infrastructure\BotSharp.OpenAPI\BotSharp.OpenAPI.csproj" />
+    <!-- For StreamingToolCallReconstructionTests: the streamed tool-call reconstruction lives here. -->
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.OpenAI\BotSharp.Plugin.OpenAI.csproj" />
+    <!-- For AnthropicStreamedContentTests: the streamed final-message content lives here. -->
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.AnthropicAI\BotSharp.Plugin.AnthropicAI.csproj" />
+    <!-- For ReadPdfFnDefaultModelTests: the PDF reading fallback model lives here. -->
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.FileHandler\BotSharp.Plugin.FileHandler.csproj" />
+    <!-- For GoogleAiUsageTests: Gemini thinking tokens must be counted as output tokens. -->
+    <ProjectReference Include="..\..\src\Plugins\BotSharp.Plugin.GoogleAI\BotSharp.Plugin.GoogleAI.csproj" />
   </ItemGroup>
 
 </Project>

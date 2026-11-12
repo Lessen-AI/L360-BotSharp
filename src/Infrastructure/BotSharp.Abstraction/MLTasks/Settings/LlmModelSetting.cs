@@ -154,6 +154,23 @@ public class ImageVariationSetting
 public class AudioSetting
 {
     public AudioTranscriptionSetting? Transcription { get; set; }
+    public AudioSynthesisSetting? Synthesis { get; set; }
+}
+
+/// <summary>
+/// Audio synthesis (text-to-speech) setting
+/// </summary>
+public class AudioSynthesisSetting
+{
+    /// <summary>
+    /// Timeout of a single request attempt, in seconds
+    /// </summary>
+    public int? TimeoutSeconds { get; set; }
+
+    /// <summary>
+    /// Number of retries after the first attempt fails or times out
+    /// </summary>
+    public int? MaxRetries { get; set; }
 }
 
 /// <summary>
@@ -185,7 +202,13 @@ public enum LlmModelType
     Embedding = 4,
     Audio = 5,
     Realtime = 6,
-    Web = 7
+    Web = 7,
+
+    /// <summary>
+    /// Full duplex voice model that runs the conversation itself and delegates the thinking to
+    /// a backend model. Kept apart from <see cref="Realtime"/>: the two are not interchangeable.
+    /// </summary>
+    Live = 8
 }
 
 public enum LlmModelCapability
@@ -203,5 +226,6 @@ public enum LlmModelCapability
     AudioGeneration = 10,
     Realtime = 11,
     WebSearch = 12,
-    PdfReading = 13
+    PdfReading = 13,
+    Live = 14
 }

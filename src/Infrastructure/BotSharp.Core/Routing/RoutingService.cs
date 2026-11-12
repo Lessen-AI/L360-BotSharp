@@ -1,3 +1,4 @@
+using BotSharp.Abstraction.Infrastructures.Enums;
 using BotSharp.Abstraction.Routing.Models;
 using BotSharp.Abstraction.Routing.Settings;
 
@@ -30,6 +31,7 @@ public partial class RoutingService : IRoutingService
     {
         var conv = _services.GetRequiredService<IConversationService>();
         var storage = _services.GetRequiredService<IConversationStorage>();
+
         await storage.Append(conv.ConversationId, message);
 
         dialogs.Add(message);
@@ -52,11 +54,12 @@ public partial class RoutingService : IRoutingService
         else
         {
             var state = _services.GetRequiredService<IConversationStateService>();
-            var useStreamMsg = state.GetState("use_stream_message");
+            var useStreamMsg = state.GetState<bool>(StateConst.USE_STREAM_MESSAGE);
+            var enLang = state.Equal(StateConst.LANGUAGE, LanguageType.ENGLISH);
             var options = new InvokeAgentOptions()
             {
                 From = InvokeSource.Routing,
-                UseStream = bool.TryParse(useStreamMsg, out var useStream) && useStream
+                UseStream = useStreamMsg && enLang
             };
             var ret = await routing.InvokeAgent(agentId, dialogs, options);
         }

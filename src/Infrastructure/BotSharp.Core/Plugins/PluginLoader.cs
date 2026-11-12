@@ -18,7 +18,10 @@ public class PluginLoader(IServiceCollection services,
 
     public void Load(Action<Assembly> loaded, string? plugin = null)
     {
-        _executingDir = Directory.GetParent(Assembly.GetEntryAssembly().Location).FullName;
+        // Assembly.GetEntryAssembly().Location is empty when the app is published
+        // as a self-contained single-file executable, which makes Directory.GetParent()
+        // throw. AppContext.BaseDirectory is populated correctly in that case too.
+        _executingDir = AppContext.BaseDirectory;
 
         settings.Assemblies.ToList().ForEach(assemblyName =>
         {
@@ -198,6 +201,9 @@ public class PluginLoader(IServiceCollection services,
                 await agentService.UpdateAgent(agent, AgentField.Disabled);
             }
         }
+
+        // AgentService caches the plugin list; drop it so the new status takes effect right away.
+        Utilities.ClearCache();
         return plugin;
     }
 

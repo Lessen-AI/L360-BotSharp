@@ -1,4 +1,5 @@
 #pragma warning disable OPENAI001
+using BotSharp.Abstraction.Infrastructures.Enums;
 using BotSharp.Abstraction.MessageHub.Models;
 using BotSharp.Core.Infrastructures.Streams;
 using BotSharp.Core.MessageHub;
@@ -35,14 +36,18 @@ public partial class ChatCompletionProvider
         {
             _logger.LogInformation($"Action: {nameof(InnerGetChatCompletions)}, Reason: {reason}, Agent: {agent.Name}, ToolCalls: {string.Join(",", value.ToolCalls.Select(x => x.FunctionName))}");
 
-            var toolCall = value.ToolCalls.FirstOrDefault();
+            // Every call the model asked for, not only the first. It routinely asks for several
+            // independent ones at once, and keeping one made it re-ask for the rest next turn.
+            var calls = ToLlmToolCalls(value.ToolCalls);
+            var toolCall = calls.FirstOrDefault();
             responseMessage = new RoleDialogModel(AgentRole.Function, text)
             {
                 CurrentAgentId = agent.Id,
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
                 ToolCallId = toolCall?.Id,
                 FunctionName = toolCall?.FunctionName,
-                FunctionArgs = toolCall?.FunctionArguments?.ToString(),
+                FunctionArgs = toolCall?.FunctionArgs,
+                ToolCalls = calls,
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
 
@@ -51,7 +56,7 @@ public partial class ChatCompletionProvider
         }
         else if (reason == ChatFinishReason.Length)
         {
-            _logger.LogWarning($"Action: {nameof(InnerGetChatCompletions)}, Reason: {reason}, Agent: {agent.Name}, MaxOutputTokens: {options.MaxOutputTokenCount}, Content:{text}");
+            _logger.LogWarning($"Action: {nameof(InnerGetChatCompletions)}, Reason: {reason}, Agent: {agent.Name}, MaxOutputTokens: {options.MaxOutputTokenCount}, Content:{DescribeContent(text)}, ToolCalls: {DescribeToolCalls(ToLlmToolCalls(value.ToolCalls))}");
 
             responseMessage = new RoleDialogModel(AgentRole.Assistant, $"AI response exceeded max output length")
             {
@@ -148,8 +153,9 @@ public partial class ChatCompletionProvider
 
         if (reason == ChatFinishReason.FunctionCall || reason == ChatFinishReason.ToolCalls)
         {
-            var toolCall = value.ToolCalls?.FirstOrDefault();
-            _logger.LogInformation($"[{agent.Name}]: {toolCall?.FunctionName}({toolCall?.FunctionArguments})");
+            var calls = ToLlmToolCalls(value.ToolCalls);
+            var toolCall = calls.FirstOrDefault();
+            _logger.LogInformation($"[{agent.Name}]: {toolCall?.FunctionName}({toolCall?.FunctionArgs})");
 
             var funcContextIn = new RoleDialogModel(AgentRole.Function, text)
             {
@@ -157,7 +163,8 @@ public partial class ChatCompletionProvider
                 MessageId = conversations.LastOrDefault()?.MessageId ?? string.Empty,
                 ToolCallId = toolCall?.Id,
                 FunctionName = toolCall?.FunctionName,
-                FunctionArgs = toolCall?.FunctionArguments?.ToString(),
+                FunctionArgs = toolCall?.FunctionArgs,
+                ToolCalls = calls,
                 RenderedInstruction = string.Join("\r\n", renderedInstructions)
             };
 
@@ -169,7 +176,7 @@ public partial class ChatCompletionProvider
         }
         else if (reason == ChatFinishReason.Length)
         {
-            _logger.LogWarning($"Action: {nameof(InnerGetChatCompletionsAsync)}, Reason: {reason}, Agent: {agent.Name}, MaxOutputTokens: {options.MaxOutputTokenCount}, Content:{text}");
+            _logger.LogWarning($"Action: {nameof(InnerGetChatCompletionsAsync)}, Reason: {reason}, Agent: {agent.Name}, MaxOutputTokens: {options.MaxOutputTokenCount}, Content:{DescribeContent(text)}, ToolCalls: {DescribeToolCalls(ToLlmToolCalls(value.ToolCalls))}");
 
             msg = new RoleDialogModel(AgentRole.Assistant, $"AI response exceeded max output length")
             {
@@ -278,23 +285,24 @@ public partial class ChatCompletionProvider
 
                 if (choice.FinishReason == ChatFinishReason.ToolCalls || choice.FinishReason == ChatFinishReason.FunctionCall)
                 {
-                    var meta = toolCalls.FirstOrDefault(x => !string.IsNullOrEmpty(x.FunctionName));
-                    var functionName = meta?.FunctionName;
-                    var toolCallId = meta?.ToolCallId;
-                    var args = toolCalls.Where(x => x.FunctionArgumentsUpdate != null).Select(x => x.FunctionArgumentsUpdate.ToString()).ToList();
-                    var functionArguments = string.Join(string.Empty, args);
+                    var calls = ReconstructToolCalls(toolCalls);
+                    var first = calls.FirstOrDefault();
 
 #if DEBUG
-                    _logger.LogDebug($"Tool Call (id: {toolCallId}) => {functionName}({functionArguments})");
+                    foreach (var call in calls)
+                    {
+                        _logger.LogDebug($"Tool Call (id: {call.Id}) => {call.FunctionName}({call.FunctionArgs})");
+                    }
 #endif
 
                     responseMessage = new RoleDialogModel(AgentRole.Function, string.Empty)
                     {
                         CurrentAgentId = agent.Id,
                         MessageId = messageId,
-                        ToolCallId = toolCallId,
-                        FunctionName = functionName,
-                        FunctionArgs = functionArguments
+                        ToolCallId = first?.Id,
+                        FunctionName = first?.FunctionName,
+                        FunctionArgs = first?.FunctionArgs ?? string.Empty,
+                        ToolCalls = calls
                     };
                 }
                 else if (choice.FinishReason == ChatFinishReason.Stop)
@@ -313,6 +321,13 @@ public partial class ChatCompletionProvider
                 }
                 else if (choice.FinishReason.HasValue)
                 {
+                    if (choice.FinishReason == ChatFinishReason.Length)
+                    {
+                        // What the model wrote before the limit is replaced by the notice below, so this is the only record of it
+                        _logger.LogWarning($"Action: {nameof(InnerGetChatCompletionsStreamingAsync)}, Reason: {choice.FinishReason}, Agent: {agent.Name}, " +
+                            $"MaxOutputTokens: {options.MaxOutputTokenCount}, Content:{DescribeContent(textStream.GetText())}, ToolCalls: {DescribeToolCalls(ReconstructToolCalls(toolCalls))}");
+                    }
+
                     var text = choice.FinishReason == ChatFinishReason.Length ? "Model reached the maximum number of tokens allowed."
                         : choice.FinishReason == ChatFinishReason.ContentFilter ? "Content is omitted due to content filter rule."
                         : choice.FinishReason.Value.ToString();
@@ -434,7 +449,7 @@ public partial class ChatCompletionProvider
         var imageDetailLevel = ChatImageDetailLevel.Auto;
         if (allowMultiModal)
         {
-            imageDetailLevel = ParseChatImageDetailLevel(_state.GetState("chat_image_detail_level"));
+            imageDetailLevel = ParseChatImageDetailLevel(_state.GetState(LlmStateConst.CHAT_IMAGE_DETAIL_LEVEL));
         }
 
         foreach (var message in filteredMessages)
@@ -603,7 +618,7 @@ public partial class ChatCompletionProvider
         var settings = settingsService.GetSetting(Provider, _model);
 
         // Reasoning
-        float? temperature = float.Parse(_state.GetState("temperature", "0.0"));
+        float? temperature = _state.GetState(LlmStateConst.TEMPERATURE, 0.0f);
         var (reasoningTemp, reasoningEffortLevel) = ParseReasoning(settings?.Reasoning, agent);
         if (reasoningTemp.HasValue)
         {
@@ -619,9 +634,8 @@ public partial class ChatCompletionProvider
             webSearchOptions = new();
         }
 
-        var maxTokens = int.TryParse(_state.GetState("max_tokens"), out var tokens)
-                        ? tokens
-                        : agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
+        var maxTokens = _state.GetState<int?>(LlmStateConst.MAX_TOKENS)
+                        ?? agent.LlmConfig?.MaxOutputTokens ?? LlmConstant.DEFAULT_MAX_OUTPUT_TOKEN;
 
         var options = new ChatCompletionOptions()
         {
@@ -635,7 +649,7 @@ public partial class ChatCompletionProvider
 
         if (webSearchOptions == null)
         {
-            var format = _state.GetState("response_format").IfNullOrEmptyAs(agent.LlmConfig?.ResponseFormat);
+            var format = _state.GetState(LlmStateConst.RESPONSE_FORMAT).IfNullOrEmptyAs(agent.LlmConfig?.ResponseFormat);
             options.ResponseFormat = GetChatResponseFormat(format);
         }
 
@@ -663,7 +677,7 @@ public partial class ChatCompletionProvider
         float? temperature = null;
         ChatReasoningEffortLevel? reasoningEffortLevel = null;
 
-        var level = _state.GetState("reasoning_effort_level");
+        var level = _state.GetState(LlmStateConst.REASONING_EFFORT_LEVEL);
 
         if (string.IsNullOrEmpty(level) && _model == agent?.LlmConfig?.Model)
         {
@@ -737,10 +751,76 @@ public partial class ChatCompletionProvider
         }
 
         // Apply tool_choice only when tools are present; tool_choice is rejected by the API otherwise.
-        if (_state.GetState("tool_choice").IsEqualTo("required"))
+        if (_state.GetState(LlmStateConst.TOOL_CHOICE).IsEqualTo("required"))
         {
             options.ToolChoice = ChatToolChoice.CreateRequiredChoice();
         }
     }
     #endregion
+
+    /// <summary>
+    /// Every tool call in a non-streaming reply, in the order the model produced them.
+    /// </summary>
+    private static List<LlmToolCall> ToLlmToolCalls(IEnumerable<ChatToolCall>? toolCalls)
+        => (toolCalls ?? [])
+            .Select(x => new LlmToolCall(x.Id, x.FunctionName, x.FunctionArguments?.ToString()))
+            .ToList();
+
+    /// <summary>
+    /// The tool calls of a reply cut off by the output limit: each name and how long its arguments got. The arguments
+    /// themselves are left out, since they can hold the user's personal data.
+    /// </summary>
+    internal static string DescribeToolCalls(List<LlmToolCall> calls)
+        => string.Join(", ", calls.Select(x => $"{x.FunctionName}({x.FunctionArgs?.Length ?? 0} chars)"));
+
+    /// <summary>
+    /// What a reply cut off by the output limit said: its length and only its start, enough to tell what the model was
+    /// writing without logging the whole reply.
+    /// </summary>
+    internal static string DescribeContent(string? text)
+        => string.IsNullOrEmpty(text) ? "(none)" : $"{text.Length} chars: {(text.Length > 200 ? text[..200] + "..." : text)}";
+
+    /// <summary>
+    /// Rebuilds the tool calls a streaming reply asked for.
+    /// </summary>
+    /// <remarks>
+    /// Arguments arrive chunked across updates and have to be accumulated, and the SDK's update
+    /// carries no index -- only a tool call id, which is present when a call opens. So an update
+    /// bearing a new id starts a call, and the fragments following it belong to that one.
+    /// Concatenating every fragment into a single string, as this did before, produced one
+    /// malformed argument blob as soon as the model asked for more than one tool at a time.
+    /// </remarks>
+    internal static List<LlmToolCall> ReconstructToolCalls(List<StreamingChatToolCallUpdate> updates)
+    {
+        var calls = new List<LlmToolCall>();
+        var args = new List<StringBuilder>();
+
+        foreach (var update in updates)
+        {
+            var opensCall = calls.Count == 0
+                || (!string.IsNullOrEmpty(update.ToolCallId) && calls[^1].Id != update.ToolCallId);
+
+            if (opensCall)
+            {
+                calls.Add(new LlmToolCall(update.ToolCallId, update.FunctionName, null));
+                args.Add(new StringBuilder());
+            }
+            else if (string.IsNullOrEmpty(calls[^1].FunctionName))
+            {
+                calls[^1].FunctionName = update.FunctionName;
+            }
+
+            if (update.FunctionArgumentsUpdate != null)
+            {
+                args[^1].Append(update.FunctionArgumentsUpdate.ToString());
+            }
+        }
+
+        for (var i = 0; i < calls.Count; i++)
+        {
+            calls[i].FunctionArgs = args[i].ToString();
+        }
+
+        return calls;
+    }
 }
