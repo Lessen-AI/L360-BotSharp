@@ -1,5 +1,6 @@
 using BotSharp.Abstraction.Models;
 using BotSharp.Abstraction.Routing.Settings;
+using BotSharp.Core.Plugins;
 
 namespace BotSharp.Core.Agents.Services;
 
@@ -11,9 +12,10 @@ public partial class AgentService
         var agents = await _db.GetAgents(filter);
 
         var routeSetting = _services.GetRequiredService<RoutingSettings>();
+        var plugins = await _services.GetRequiredService<PluginLoader>().GetPlugins(_services);
         foreach (var agent in agents)
         {
-            agent.Plugin = await GetPlugin(agent.Id);
+            agent.Plugin = MatchPlugin(plugins, agent.Id);
         }
 
         agents = agents.Where(x => x.Installed).ToList();
@@ -61,7 +63,8 @@ public partial class AgentService
         var agentSetting = _services.GetRequiredService<AgentSettings>();
         if (profile.LlmConfig == null)
         {
-            profile.LlmConfig = agentSetting.LlmConfig;
+            // A copy: flagging IsInherit on the shared settings instance marked the default config itself as inherited.
+            profile.LlmConfig = agentSetting.LlmConfig.DeepClone() ?? new AgentLlmConfig();
             profile.LlmConfig.IsInherit = true;
         }
         else if (string.IsNullOrEmpty(profile.LlmConfig?.Provider) || string.IsNullOrEmpty(profile.LlmConfig?.Model))

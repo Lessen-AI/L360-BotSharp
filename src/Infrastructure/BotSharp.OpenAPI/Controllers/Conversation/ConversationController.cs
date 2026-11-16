@@ -1,5 +1,6 @@
 using BotSharp.Abstraction.Files.Constants;
 using BotSharp.Abstraction.Files.Enums;
+using BotSharp.Abstraction.Infrastructures.Enums;
 using BotSharp.Abstraction.MessageHub.Models;
 using BotSharp.Abstraction.MessageHub.Services;
 using BotSharp.Abstraction.Options;
@@ -17,22 +18,30 @@ public partial class ConversationController : ControllerBase
     private readonly IServiceProvider _services;
     private readonly IUserIdentity _user;
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly ILogger<ConversationController> _logger;
+
+    private const string StreamingFlag = "streaming";
+    private const string DoneFlag = "done";
+    private const string IndicatingFlag = "indicating";
+    private const string ErrorFlag = "error";
 
     public ConversationController(
         IServiceProvider services,
         IUserIdentity user,
-        BotSharpOptions options)
+        BotSharpOptions options,
+        ILogger<ConversationController> logger)
     {
         _services = services;
         _user = user;
         _jsonOptions = InitJsonOptions(options);
+        _logger = logger;
     }
 
     [HttpPost("/conversation/{agentId}")]
     public async Task<ConversationViewModel> NewConversation([FromRoute] string agentId, [FromBody] MessageConfig config)
     {
         var service = _services.GetRequiredService<IConversationService>();
-        var channel = config.States.FirstOrDefault(x => x.Key == "channel");
+        var channel = config.States.FirstOrDefault(x => x.Key == StateConst.CHANNEL);
         var conv = new Conversation
         {
             AgentId = agentId,
@@ -118,6 +127,13 @@ public partial class ConversationController : ControllerBase
         var dialogs = new List<ChatResponseModel>();
         foreach (var message in history)
         {
+            // Part of the record, not of the conversation: what an agent said to itself between
+            // tool calls. It stays in storage and in the model's context, and is not rendered.
+            if (message.MessageType == MessageTypeName.Internal)
+            {
+                continue;
+            }
+
             if (message.Role == AgentRole.User)
             {
                 var user = await userService.GetUser(message.SenderId);
@@ -448,9 +464,17 @@ public partial class ConversationController : ControllerBase
     public async Task SendMessageSse([FromRoute] string agentId, [FromRoute] string conversationId, [FromBody] NewMessageModel input)
     {
         var observer = _services.GetRequiredService<IObserverService>();
-        using var container = observer.SubscribeObservers<HubObserveData<RoleDialogModel>>(conversationId, listeners: new()
+        // ChatHubObserver is left out on purpose. It answers every event by serializing a DTO and pushing it
+        // to the SignalR group, which for a caller reading this response is work for nobody -- and with a
+        // Redis backplane configured that push leaves the process once per token. Callers who want events
+        // over SignalR post to SendMessage instead, where every observer still runs.
+        using var container = observer.SubscribeObservers<HubObserveData<RoleDialogModel>>(
+            conversationId,
+            names: [nameof(BotSharp.Core.MessageHub.Observers.ConversationObserver)],
+            listeners: new()
         {
-            { ChatEvent.OnIndicationReceived, async data => await OnReceiveToolCallIndication(conversationId, data.Data) }
+            { ChatEvent.OnIndicationReceived, async data => await OnReceiveToolCallIndication(conversationId, data.Data) },
+            { ChatEvent.OnReceiveLlmStreamMessage, async data => await OnReceiveStreamingDelta(conversationId, data.Data) }
         });
 
         var conv = _services.GetRequiredService<IConversationService>();
@@ -474,34 +498,70 @@ public partial class ConversationController : ControllerBase
             MessageId = inputMsg.MessageId,
         };
 
-        Response.StatusCode = 200;
-        Response.Headers.Append(Microsoft.Net.Http.Headers.HeaderNames.ContentType, "text/event-stream");
-        Response.Headers.Append(Microsoft.Net.Http.Headers.HeaderNames.CacheControl, "no-cache");
-        Response.Headers.Append(Microsoft.Net.Http.Headers.HeaderNames.Connection, "keep-alive");
+        IConversationCancellationService? convCancellation = null;
+        if (input.IsStreamingMessage)
+        {
+            convCancellation = _services.GetRequiredService<IConversationCancellationService>();
+            convCancellation.RegisterConversation(conversationId);
+        }
 
-        await conv.SendMessage(agentId, inputMsg,
-                replyMessage: input.Postback,
-                // responsed generated
-                async msg =>
-                {
-                    response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
-                    response.MessageLabel = msg.MessageLabel;
-                    response.Function = msg.FunctionName;
-                    response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
-                    response.Instruction = msg.Instruction;
-                    response.Data = msg.Data;
-                    response.Thought = msg.Thought;
-                    response.MetaData = msg.MetaData;
-                    response.States = state.GetStates();
+        PrepareSseResponse();
 
-                    await OnChunkReceived(Response, response);
-                });
+        var cancelled = false;
+        var failed = false;
+        try
+        {
+            await conv.SendMessage(agentId, inputMsg,
+                    replyMessage: input.Postback,
+                    // responsed generated
+                    async msg =>
+                    {
+                        response.Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content;
+                        response.MessageLabel = msg.MessageLabel;
+                        response.Function = msg.FunctionName;
+                        response.RichContent = msg.SecondaryRichContent ?? msg.RichContent;
+                        response.Instruction = msg.Instruction;
+                        response.Data = msg.Data;
+                        response.Thought = msg.Thought;
+                        response.MetaData = msg.MetaData;
+                        response.States = state.GetStates();
 
-        response.States = state.GetStates();
-        response.MessageId = inputMsg.MessageId;
-        response.ConversationId = conversationId;
+                        await WriteFrame(Response, response);
+                    });
+        }
+        catch (OperationCanceledException) when (input.IsStreamingMessage)
+        {
+            // Already committed to a 200, so the closing frame reports the cancellation instead.
+            cancelled = true;
+        }
+        catch (Exception ex)
+        {
+            // Not rethrown: that would reset the connection and lose the frames already written. The
+            // closing frame reports the failure; the reason stays here, where the exception is logged in full.
+            _logger.LogError(ex, $"Streaming conversation {conversationId} failed. {ex.Message}");
+            failed = true;
+        }
+        finally
+        {
+            convCancellation?.UnregisterConversation(conversationId);
+        }
 
-        // await OnEventCompleted(Response);
+        // Every response ends with this frame: without it a client cannot tell a finished reply from a
+        // dropped connection or a proxy timeout. Skipped when the client is already gone -- the write it
+        // would attempt sits outside the catch above, so a failure there has nothing to handle it.
+        if (!HttpContext.RequestAborted.IsCancellationRequested)
+        {
+            await OnEventCompleted(Response, conversationId, cancelled, failed);
+        }
+    }
+
+    private void PrepareSseResponse()
+    {
+        Response.ContentType = "text/event-stream";
+        Response.Headers[Microsoft.Net.Http.Headers.HeaderNames.CacheControl] = "no-cache";
+        // nginx buffers proxied responses by default, holding every frame back until the agent has
+        // finished. Connection is left unset: illegal on HTTP/2, and Kestrel manages it on HTTP/1.1.
+        Response.Headers["X-Accel-Buffering"] = "no";
     }
 
     [HttpPost("/conversation/{conversationId}/stop-streaming")]
@@ -517,28 +577,28 @@ public partial class ConversationController : ControllerBase
     #region Private methods
     private void SetStates(IConversationService conv, NewMessageModel input)
     {
-        if (string.IsNullOrEmpty(conv.States.GetState("channel")))
+        if (conv.States.IsNullOrEmpty(StateConst.CHANNEL))
         {
-            conv.States.SetState("channel", input.Channel, source: StateSource.External);
+            conv.States.SetState(StateConst.CHANNEL, input.Channel, source: StateSource.External);
         }
-        if (string.IsNullOrEmpty(conv.States.GetState("provider")))
+        if (conv.States.IsNullOrEmpty(LlmStateConst.PROVIDER))
         {
-            conv.States.SetState("provider", input.Provider, source: StateSource.External);
+            conv.States.SetState(LlmStateConst.PROVIDER, input.Provider, source: StateSource.External);
         }
-        if (string.IsNullOrEmpty(conv.States.GetState("model")))
+        if (conv.States.IsNullOrEmpty(LlmStateConst.MODEL))
         {
-            conv.States.SetState("model", input.Model, source: StateSource.External);
+            conv.States.SetState(LlmStateConst.MODEL, input.Model, source: StateSource.External);
         }
-        if (string.IsNullOrEmpty(conv.States.GetState("temperature")))
+        if (conv.States.IsNullOrEmpty(LlmStateConst.TEMPERATURE))
         {
-            conv.States.SetState("temperature", input.Temperature, source: StateSource.External);
+            conv.States.SetState(LlmStateConst.TEMPERATURE, input.Temperature, source: StateSource.External);
         }
-        if (string.IsNullOrEmpty(conv.States.GetState("sampling_factor")))
+        if (conv.States.IsNullOrEmpty(LlmStateConst.SAMPLING_FACTOR))
         {
-            conv.States.SetState("sampling_factor", input.SamplingFactor, source: StateSource.External);
+            conv.States.SetState(LlmStateConst.SAMPLING_FACTOR, input.SamplingFactor, source: StateSource.External);
         }
 
-        conv.States.SetState("use_stream_message", input.IsStreamingMessage, source: StateSource.Application);
+        conv.States.SetState(StateConst.USE_STREAM_MESSAGE, input.IsStreamingMessage, source: StateSource.Application);
     }
 
     private FileContentResult BuildFileResult(string file)
@@ -551,25 +611,24 @@ public partial class ConversationController : ControllerBase
         return File(bytes, "application/octet-stream", Path.GetFileName(file), enableRangeProcessing: enableRangeProcessing);
     }
 
-    private async Task OnChunkReceived(HttpResponse response, ChatResponseModel message)
+    private async Task WriteFrame(HttpResponse response, object message)
     {
         var json = JsonSerializer.Serialize(message, _jsonOptions);
 
-        var buffer = Encoding.UTF8.GetBytes($"data:{json}\n");
-        await response.Body.WriteAsync(buffer, 0, buffer.Length);
-        await Task.Delay(10);
-
-        buffer = Encoding.UTF8.GetBytes("\n");
+        var buffer = Encoding.UTF8.GetBytes($"data:{json}\n\n");
         await response.Body.WriteAsync(buffer, 0, buffer.Length);
     }
 
-    private async Task OnEventCompleted(HttpResponse response)
+    private async Task OnEventCompleted(HttpResponse response, string conversationId, bool cancelled, bool failed)
     {
-        var buffer = Encoding.UTF8.GetBytes("data:[DONE]\n");
-        await response.Body.WriteAsync(buffer, 0, buffer.Length);
+        var completion = new StreamingCompletion
+        {
+            Function = failed ? ErrorFlag : DoneFlag,
+            ConversationId = conversationId,
+            Cancelled = cancelled
+        };
 
-        buffer = Encoding.UTF8.GetBytes("\n");
-        await response.Body.WriteAsync(buffer, 0, buffer.Length);
+        await WriteFrame(response, completion);
     }
 
     private JsonSerializerOptions InitJsonOptions(BotSharpOptions options)
@@ -599,11 +658,24 @@ public partial class ConversationController : ControllerBase
             ConversationId = conversationId,
             MessageId = msg.MessageId,
             Text = msg.Indication,
-            Function = "indicating",
+            Function = IndicatingFlag,
             Instruction = msg.Instruction,
             States = []
         };
-        await OnChunkReceived(Response, indicator);
+        await WriteFrame(Response, indicator);
+    }
+
+    private async Task OnReceiveStreamingDelta(string conversationId, RoleDialogModel msg)
+    {
+        var delta = new StreamingDelta
+        {
+            ConversationId = conversationId,
+            MessageId = msg.MessageId,
+            Function = StreamingFlag,
+            Text = !string.IsNullOrEmpty(msg.SecondaryContent) ? msg.SecondaryContent : msg.Content,
+            Thought = msg.Thought
+        };
+        await WriteFrame(Response, delta);
     }
     #endregion
 }

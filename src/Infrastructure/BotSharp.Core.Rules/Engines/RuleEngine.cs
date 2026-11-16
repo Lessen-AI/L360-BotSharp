@@ -1,3 +1,8 @@
+﻿using BotSharp.Abstraction.MessageHub.Models;
+using BotSharp.Abstraction.Infrastructures.Enums;
+using BotSharp.Abstraction.MessageHub.Services;
+using BotSharp.Abstraction.Templating;
+
 namespace BotSharp.Core.Rules.Engines;
 
 public class RuleEngine : IRuleEngine
@@ -13,7 +18,7 @@ public class RuleEngine : IRuleEngine
         _logger = logger;
     }
 
-    public async Task<IEnumerable<string>> Triggered(IRuleTrigger trigger, string text, IEnumerable<MessageState>? states = null, RuleTriggerOptions? options = null)
+    public async Task<IEnumerable<string>> Triggered(IRuleTrigger trigger, string text, IEnumerable<MessageState>? states = null, RuleTriggerOptions? options = null, CancellationToken cancellationToken = default)
     {
         var newConversationIds = new List<string>();
 
@@ -27,54 +32,149 @@ public class RuleEngine : IRuleEngine
             }
         });
 
-        // Resolve the criteria evaluator
-        IRuleCriteriaEvaluator? criteriaEvaluator = null;
-        if (options?.Criteria != null)
+        // Flatten the agent/rule pairs so the two loops read as one sequence of rules.
+        var pendingRules = agents.Items
+            .Where(x => !x.Disabled)
+            .SelectMany(x => x.Rules
+                .Where(r => r != null && r.TriggerName.IsEqualTo(trigger.Name) && !r.Disabled)
+                .Select(r => (Agent: x, Rule: r)))
+            .ToList();
+
+        foreach (var item in pendingRules)
         {
-            criteriaEvaluator = ResolveCriteriaEvaluator(options.Criteria.Type);
-            if (criteriaEvaluator == null)
-            {
-                _logger.LogWarning($"Unable to find rule criteria evaluator for type ({options.Criteria.Type}).");
-            }
-        }
+            // A cancellation source of the rule's own, so a rule that runs too long is the only thing given
+            // up on and the loop still gets to the rules behind it. Linked to the caller's token so a
+            // cancelled run cuts the rule in flight short the way it did before there was a per-rule limit;
+            // which of the two fired is what the catch clauses below tell apart. Null when no limit is
+            // configured, which is the default - then there is nothing to cancel but the caller's token.
+            using var ruleCts = CreateRuleCancellation(options, cancellationToken);
 
-        // Trigger agents
-        var filteredAgents = agents.Items.Where(x => x.Rules.Exists(r => r.TriggerName.IsEqualTo(trigger.Name) && !x.Disabled)).ToList();
-        foreach (var agent in filteredAgents)
-        {
-            var rule = agent.Rules.FirstOrDefault(x => x.TriggerName.IsEqualTo(trigger.Name) && !x.Disabled);
-            if (rule == null)
+            try
             {
-                continue;
-            }
-
-            if (criteriaEvaluator != null)
-            {
-                var criteriaContext = new RuleCriteriaContext
+                var convId = await RunRule(item.Agent, item.Rule, trigger, text, states, options, ruleCts?.Token ?? cancellationToken);
+                if (!string.IsNullOrEmpty(convId))
                 {
-                    Text = text,
-                    Options = options!.Criteria!,
-                    States = states
-                };
-
-                var isTriggered = await EvaluateCriteria(criteriaEvaluator, agent, trigger, criteriaContext);
-                if (!isTriggered)
-                {
-                    continue;
+                    newConversationIds.Add(convId);
                 }
             }
-
-            var convId = await SendMessageToAgent(agent, trigger, text, states);
-            newConversationIds.Add(convId);
+            catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+            {
+                // The caller cancelled the run, so nothing further is dispatched. The conversations that
+                // were already started ride along on the exception so they are not silently lost.
+                _logger.LogWarning($"Rule trigger ({trigger.Name}) was cancelled after starting {newConversationIds.Count} conversation(s).");
+                throw new RuleTriggerCanceledException(newConversationIds.ToList(), cancellationToken, ex);
+            }
+            catch (OperationCanceledException ex)
+            {
+                // The run itself was not cancelled, so this is the rule's own limit running out - or
+                // something inside it timing out on its own account. Either way it is one rule's problem,
+                // and the rules that follow still get their turn, each under a source of its own.
+                _logger.LogError(ex, $"Rule ({item.Rule.TriggerName}) for agent ({item.Agent.Name}) did not finish before it was cancelled, moving on to the next rule.");
+            }
+            catch (Exception ex)
+            {
+                // One misbehaving rule should not take down the rules that follow it.
+                _logger.LogError(ex, $"Error when running rule ({item.Rule.TriggerName}) for agent ({item.Agent.Name}).");
+            }
         }
 
         return newConversationIds;
     }
 
-    #region Criteria
-    private IRuleCriteriaEvaluator? ResolveCriteriaEvaluator(string type)
+    /// <summary>
+    /// The cancellation source a single rule runs under.
+    /// </summary>
+    /// <returns>
+    /// Null when no per-rule limit is configured, which is the default - the caller's own token is then all
+    /// there is to run under, and there is no source to dispose. A limit of zero or less is read the same
+    /// way, so <see cref="Timeout.InfiniteTimeSpan"/> and null say the same thing.
+    /// </returns>
+    private static CancellationTokenSource? CreateRuleCancellation(RuleTriggerOptions? options, CancellationToken cancellationToken)
     {
-        return _services.GetServices<IRuleCriteriaEvaluator>().FirstOrDefault(x => x.Type.IsEqualTo(type));
+        var timeout = options?.RuleTimeout;
+        if (timeout == null || timeout <= TimeSpan.Zero)
+        {
+            return null;
+        }
+
+        // Linked rather than standalone: a cancelled run should still reach the rule in flight, and the
+        // caller's token is checked first when the exception comes back, so a latched one is read as
+        // "stop the run" rather than being mistaken for this rule's limit.
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout.Value);
+        return cts;
+    }
+
+    /// <summary>
+    /// Evaluates one rule and, when it is triggered, sends its message to the agent.
+    /// Returns the new conversation id, or null when the rule did not trigger.
+    /// </summary>
+    private async Task<string?> RunRule(
+        Agent agent,
+        AgentRule rule,
+        IRuleTrigger trigger,
+        string text,
+        IEnumerable<MessageState>? states,
+        RuleTriggerOptions? options,
+        CancellationToken cancellationToken)
+    {
+        // Every rule runs in its own scope so the scoped conversation, state and routing
+        // services start clean per run, concurrent rules cannot bleed into each other, and
+        // the caller's own scope is left untouched.
+        using var scope = _services.CreateScope();
+        var sp = scope.ServiceProvider;
+
+        // The rule's own mode wins over the mode carried on the trigger options, so an agent can
+        // pick how its criteria is judged without the caller knowing.
+        var evaluator = ResolveCriteriaEvaluator(sp, rule.CriteriaConfig?.Mode)
+            ?? ResolveCriteriaEvaluator(sp, options?.Criteria?.Mode);
+
+        if (evaluator == null && !string.IsNullOrWhiteSpace(options?.Criteria?.Mode))
+        {
+            _logger.LogWarning($"Unable to find rule criteria evaluator for type ({options.Criteria.Mode}).");
+        }
+
+        if (evaluator != null && options?.Criteria != null)
+        {
+            var criteriaContext = new RuleCriteriaContext
+            {
+                Options = options.Criteria,
+                States = states
+            };
+
+            var isTriggered = await EvaluateCriteria(sp, evaluator, agent, rule, trigger, criteriaContext);
+            if (!isTriggered)
+            {
+                return null;
+            }
+        }
+
+        // Criteria evaluation can be slow (the llm evaluator calls out), so re-check before
+        // starting a conversation that nobody is waiting on any more.
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var msg = !string.IsNullOrWhiteSpace(rule.Message) ? rule.Message : text;
+        var convId = await SendMessageToAgent(sp, agent, trigger, text, msg, states, options);
+
+        // Pause before the next rule, so a large batch does not hammer the downstream provider.
+        var delay = options?.SendMessageDelayMs ?? RuleTriggerOptions.DefaultSendMessageDelayMs;
+        if (delay > 0)
+        {
+            await Task.Delay(delay, cancellationToken);
+        }
+
+        return convId;
+    }
+
+    #region Criteria
+    private IRuleCriteriaEvaluator? ResolveCriteriaEvaluator(IServiceProvider sp, string? mode)
+    {
+        if (string.IsNullOrWhiteSpace(mode))
+        {
+            return null;
+        }
+
+        return sp.GetServices<IRuleCriteriaEvaluator>().FirstOrDefault(x => x.Type.IsEqualTo(mode));
     }
 
     /// <summary>
@@ -84,12 +184,14 @@ public class RuleEngine : IRuleEngine
     /// so a null from it means "not triggered".
     /// </summary>
     private async Task<bool> EvaluateCriteria(
+        IServiceProvider sp,
         IRuleCriteriaEvaluator evaluator,
         Agent agent,
+        AgentRule agentRule,
         IRuleTrigger trigger,
         RuleCriteriaContext context)
     {
-        var isTriggered = await evaluator.EvaluateAsync(agent, trigger, context);
+        var isTriggered = await evaluator.EvaluateAsync(agent, agentRule, trigger, context);
         if (isTriggered != null)
         {
             return isTriggered.Value;
@@ -100,7 +202,7 @@ public class RuleEngine : IRuleEngine
             return false;
         }
 
-        var llmEvaluator = ResolveCriteriaEvaluator(BuiltInRuleCriteria.Llm);
+        var llmEvaluator = ResolveCriteriaEvaluator(sp, BuiltInRuleCriteria.Llm);
         if (llmEvaluator == null)
         {
             _logger.LogWarning($"Unable to find llm rule criteria evaluator to fall back to from ({evaluator.Type}).");
@@ -108,677 +210,43 @@ public class RuleEngine : IRuleEngine
         }
 
         _logger.LogInformation($"Rule criteria evaluator ({evaluator.Type}) returned no result, falling back to llm for agent ({agent.Name}) and trigger ({trigger.Name}).");
-        return await llmEvaluator.EvaluateAsync(agent, trigger, context) ?? false;
+        return await llmEvaluator.EvaluateAsync(agent, agentRule, trigger, context) ?? false;
     }
     #endregion
 
-//    public async Task ExecuteGraphNode(FlowNode node, FlowGraph graph, string agentId, IRuleTrigger trigger, RuleNodeExecutionOptions options)
-//    {
-//        if (node == null || graph == null || options == null)
-//        {
-//            return;
-//        }
-
-//        var agentService = _services.GetRequiredService<IAgentService>();
-//        var agent = await agentService.GetAgent(agentId);
-
-//        var triggerOptions = new RuleTriggerOptions
-//        {
-//            Flow = options.Flow,
-//            JsonOptions = options.JsonOptions
-//        };
-
-//        var execResults = new List<RuleFlowStepResult>();
-//        await ExecuteGraphNode(
-//            node, graph,
-//            agent, trigger,
-//            options.Text,
-//            options.States,
-//            null,
-//            triggerOptions,
-//            execResults);
-//        graph.Clear();
-//    }
-
-//    #region Graph
-//    private async Task<FlowGraph?> LoadGraph(string name, Agent agent, IRuleTrigger trigger, RuleFlowOptions? options)
-//    {
-//        var flow = _services.GetServices<IRuleFlow<FlowGraph>>().FirstOrDefault(x => x.Name.IsEqualTo(name));
-//        if (flow == null)
-//        {
-//            return null;
-//        }
-
-//        try
-//        {
-//            var config = await flow.GetTopologyConfigAsync(options: new()
-//            {
-//                TopologyName = name
-//            });
-
-//            var topologyId = config?.TopologyId;
-//            if (string.IsNullOrEmpty(topologyId))
-//            {
-//                return null;
-//            }
-
-
-//            var param = new Dictionary<string, object>(options?.Parameters ?? []);
-//            param["agent"] = param.GetValueOrDefault("agent", agent.Name);
-//            param["agent_id"] = param.GetValueOrDefault("agent_id", agent.Id);
-//            param["trigger"] = param.GetValueOrDefault("trigger", trigger.Name);
-
-//            var graph = await flow.GetTopologyAsync(topologyId, options: new()
-//            {
-//                Query = options?.Query,
-//                Parameters = param
-//            });
-
-//            if (graph != null)
-//            {
-//                // Apply input/output schemas from node config to the node
-//                LoadConfigSchemas(graph);
-
-//                // Validate input/output schema compatibility between connected nodes
-//                if (options?.SkipValidation != true)
-//                {
-//                    ValidateGraphSchema(graph);
-//                }
-//            }
-
-//            return graph;
-//        }
-//        catch (Exception ex)
-//        {
-//            _logger.LogError(ex, $"Error when loading graph (name: {name}, agent: {agent}, trigger: {trigger?.Name})");
-//            return null;
-//        }
-//    }
-
-//    private async Task ExecuteGraphNode(
-//        FlowNode node,
-//        FlowGraph graph,
-//        Agent agent,
-//        IRuleTrigger trigger,
-//        string text,
-//        IEnumerable<MessageState>? states,
-//        Dictionary<string, string?>? data,
-//        RuleTriggerOptions? options,
-//        List<RuleFlowStepResult> results)
-//    {
-//        try
-//        {
-//            await ExecuteGraphTraversal(node, graph, agent, trigger, text, states, data, options, results);
-//        }
-//        catch { }
-//    }
-
-//    /// <summary>
-//    /// Unified graph traversal that uses a swappable frontier.
-//    /// Stack frontier → DFS, Queue frontier → BFS.
-//    /// A node or edge can request a mid-traversal switch via its
-//    /// <c>Config["traversal_algorithm"]</c> value ("dfs" or "bfs").
-//    /// </summary>
-//    private async Task ExecuteGraphTraversal(
-//        FlowNode root,
-//        FlowGraph graph,
-//        Agent agent,
-//        IRuleTrigger trigger,
-//        string text,
-//        IEnumerable<MessageState>? states,
-//        Dictionary<string, string?>? data,
-//        RuleTriggerOptions? options,
-//        List<RuleFlowStepResult> results)
-//    {
-//        var flow = options?.Flow;
-//        var maxRecursion = flow?.MaxRecursion > 0 ? flow.MaxRecursion : RuleConstant.MAX_GRAPH_RECURSION;
-//        var innerData = new Dictionary<string, string?>(data ?? []);
-
-//        // Choose initial frontier based on the global option
-//        var useBfs = options?.Flow?.TraversalAlgorithm?.IsEqualTo("bfs") == true;
-//        IFrontier<(FlowNode Node, FlowEdge Edge)> frontier = useBfs
-//            ? new QueueFrontier<(FlowNode, FlowEdge)>()
-//            : new StackFrontier<(FlowNode, FlowEdge)>();
-
-//        EnqueueChildren(frontier, graph, root);
-
-//        while (frontier.Count > 0)
-//        {
-//            if (results.Count >= maxRecursion)
-//            {
-//                _logger.LogWarning("Exceed max graph nodes {MaxNodes} (agent {Agent} and trigger {Trigger}).",
-//                    maxRecursion, agent.Name, trigger.Name);
-//                break;
-//            }
-
-//            var (nextNode, nextEdge) = frontier.Remove();
-
-//            // Check whether node requests a traversal switch
-//            frontier = SwitchFrontier(frontier, nextNode);
-
-//            // Build context
-//            var context = new RuleFlowContext
-//            {
-//                Node = nextNode,
-//                Edge = nextEdge,
-//                Graph = graph,
-//                Text = text,
-//                Parameters = BuildParameters(states, innerData),
-//                PrevStepResults = results,
-//                JsonOptions = options?.JsonOptions
-//            };
-
-//            if (RuleConstant.CONDITION_NODE_TYPES.Contains(nextNode.Type, StringComparer.OrdinalIgnoreCase))
-//            {
-//                var conditionResult = await ExecuteCondition(nextNode, nextEdge, graph, agent, trigger, context);
-//                innerData = new(context.Parameters ?? []);
-
-//                if (conditionResult == null)
-//                {
-//                    results.Add(RuleFlowStepResult.FromResult(new()
-//                    {
-//                        Success = false,
-//                        ErrorMessage = $"Unable to find condition {nextNode.Name}."
-//                    }, nextNode));
-//                    continue;
-//                }
-
-//                results.Add(RuleFlowStepResult.FromResult(conditionResult, nextNode));
-
-//                if (conditionResult.Success)
-//                {
-//                    EnqueueChildren(frontier, graph, nextNode);
-//                }
-//                else
-//                {
-//                    _logger.LogInformation("Condition {ConditionName} evaluated to false, skipping next node (agent {Agent} and trigger {Trigger}).",
-//                        nextNode.Name, agent.Name, trigger.Name);
-//                }
-//            }
-//            else if (RuleConstant.ACTION_NODE_TYPES.Contains(nextNode.Type, StringComparer.OrdinalIgnoreCase)
-//                  || RuleConstant.ROOT_NODE_TYPES.Contains(nextNode.Type, StringComparer.OrdinalIgnoreCase)
-//                  || RuleConstant.END_NODE_TYPES.Contains(nextNode.Type, StringComparer.OrdinalIgnoreCase))
-//            {
-//                var actionResult = await ExecuteAction(nextNode, nextEdge, graph, agent, trigger, context);
-//                innerData = new(context.Parameters ?? []);
-
-//                if (actionResult == null)
-//                {
-//                    results.Add(RuleFlowStepResult.FromResult(new()
-//                    {
-//                        Success = false,
-//                        ErrorMessage = $"Unable to find action {nextNode.Name}."
-//                    }, nextNode));
-//                    continue;
-//                }
-
-//                results.Add(RuleFlowStepResult.FromResult(actionResult, nextNode));
-
-//                if (!actionResult.IsDelayed)
-//                {
-//                    EnqueueChildren(frontier, graph, nextNode);
-//                }
-//            }
-//            else
-//            {
-//                results.Add(RuleFlowStepResult.FromResult(new()
-//                {
-//                    Success = true,
-//                    Response = $"Pass through node {nextNode.Name}."
-//                }, nextNode));
-
-//                EnqueueChildren(frontier, graph, nextNode);
-//            }
-//        }
-//    }
-
-//    /// <summary>
-//    /// If the node carries a <c>traversal_algorithm</c> config value
-//    /// that differs from the current frontier type, swap to the requested one
-//    /// and drain all pending items into the new frontier.
-//    /// </summary>
-//    private static IFrontier<(FlowNode, FlowEdge)> SwitchFrontier(
-//        IFrontier<(FlowNode, FlowEdge)> current,
-//        FlowNode? node)
-//    {
-//        // Edge config takes precedence over node config
-//        var hint = node?.Config?.GetValueOrDefault("traversal_algorithm");
-
-//        if (string.IsNullOrEmpty(hint))
-//        {
-//            return current;
-//        }
-
-//        var requireBfs = hint.Equals("bfs", StringComparison.OrdinalIgnoreCase);
-//        var currentBfs = current is QueueFrontier<(FlowNode, FlowEdge)>;
-
-//        if (requireBfs == currentBfs)
-//        {
-//            return current;
-//        }
-
-//        IFrontier<(FlowNode, FlowEdge)> next = requireBfs
-//            ? new QueueFrontier<(FlowNode, FlowEdge)>()
-//            : new StackFrontier<(FlowNode, FlowEdge)>();
-
-//        current.DrainTo(next);
-//        return next;
-//    }
-
-//    private static void EnqueueChildren(
-//        IFrontier<(FlowNode Node, FlowEdge Edge)> frontier,
-//        FlowGraph graph,
-//        FlowNode parent)
-//    {
-//        var sortAscending = frontier is StackFrontier<(FlowNode, FlowEdge)>;
-//        foreach (var child in graph.GetChildrenNodes(parent, sortAscending))
-//        {
-//            frontier.Add(child);
-//        }
-//    }
-//    #endregion
-
-
-//    #region Schema Validation
-//    /// <summary>
-//    /// Reads "input_schema" and "output_schema" from each node's Config,
-//    /// deserializes them into FlowUnitSchema, and sets them on the FlowNode.
-//    /// If a node has no config schema, the code-defined schema from the
-//    /// resolved IRuleFlowUnit is used as fallback during validation.
-//    /// </summary>
-//    private void LoadConfigSchemas(FlowGraph graph)
-//    {
-//        var nodes = graph.GetNodes();
-//        if (nodes == null)
-//        {
-//            return;
-//        }
-
-//        foreach (var node in nodes)
-//        {
-//            if (node.Config.IsNullOrEmpty())
-//            {
-//                continue;
-//            }
-
-//            if (node.Config!.TryGetValue(RuleConstant.INPUT_SCHEMA_KEY, out var inputJson)
-//                && !string.IsNullOrEmpty(inputJson))
-//            {
-//                try
-//                {
-//                    node.InputSchema = JsonSerializer.Deserialize<FlowUnitSchema>(inputJson);
-//                }
-//                catch (Exception ex)
-//                {
-//                    _logger.LogWarning(ex, "Failed to deserialize input_schema from config of node [{NodeName}].", node.Name);
-//                }
-//            }
-
-//            if (node.Config!.TryGetValue(RuleConstant.OUTPUT_SCHEMA_KEY, out var outputJson)
-//                && !string.IsNullOrEmpty(outputJson))
-//            {
-//                try
-//                {
-//                    node.OutputSchema = JsonSerializer.Deserialize<FlowUnitSchema>(outputJson);
-//                }
-//                catch (Exception ex)
-//                {
-//                    _logger.LogWarning(ex, "Failed to deserialize output_schema from config of node [{NodeName}].", node.Name);
-//                }
-//            }
-//        }
-//    }
-
-//    /// <summary>
-//    /// Validates that for every edge in the graph, the downstream node's required input fields
-//    /// can be satisfied by the upstream node's output or the downstream node's own config.
-//    /// Node-level schemas (from config) take precedence over code-defined schemas.
-//    /// </summary>
-//    private void ValidateGraphSchema(FlowGraph graph)
-//    {
-//        var edges = graph.GetEdges();
-//        if (edges == null || !edges.Any())
-//        {
-//            return;
-//        }
-
-//        foreach (var edge in edges)
-//        {
-//            if (edge.From == null || edge.To == null)
-//            {
-//                continue;
-//            }
-
-//            var sourceUnit = ResolveFlowUnit(edge.From);
-//            var targetUnit = ResolveFlowUnit(edge.To);
-
-//            // Config-defined schema on the node takes precedence over code-defined
-//            var targetInputSchema = edge.To.InputSchema ?? targetUnit?.InputSchema;
-//            if (targetInputSchema?.Required == null || targetInputSchema.Required.Count == 0)
-//            {
-//                continue;
-//            }
-
-//            // Collect available keys from upstream output and downstream node's own config
-//            var availableKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-//            var sourceOutputSchema = edge.From.OutputSchema ?? sourceUnit?.OutputSchema;
-//            if (sourceOutputSchema?.Properties != null && !sourceOutputSchema.Properties.Keys.IsNullOrEmpty())
-//            {
-//                foreach (var key in sourceOutputSchema.Properties.Keys)
-//                {
-//                    availableKeys.Add(key);
-//                }
-//            }
-
-//            if (edge.To.Config != null && !edge.To.Config.Keys.IsNullOrEmpty())
-//            {
-//                foreach (var key in edge.To.Config.Keys)
-//                {
-//                    availableKeys.Add(key);
-//                }
-//            }
-
-//            // Check each required input field
-//            foreach (var key in targetInputSchema.Required)
-//            {
-//                if (!availableKeys.Contains(key))
-//                {
-//                    _logger.Log(
-//#if DEBUG
-//                        LogLevel.Critical,
-//#else
-//                        LogLevel.Warning,
-//#endif
-//                        "Schema validation: edge [{SourceNode}] -> [{TargetNode}]: " +
-//                        "required input '{Key}' is not provided by upstream output or node config.",
-//                        edge.From.Name, edge.To.Name, key);
-//                }
-//                // Validate type compatibility when both schemas define the property
-//                else if (sourceOutputSchema?.Properties != null
-//                    && sourceOutputSchema.Properties.TryGetValue(key, out var sourceProp)
-//                    && targetInputSchema.Properties.TryGetValue(key, out var targetProp)
-//                    && !string.IsNullOrEmpty(sourceProp.Type)
-//                    && !string.IsNullOrEmpty(targetProp.Type)
-//                    && !sourceProp.Type.Equals(targetProp.Type, StringComparison.OrdinalIgnoreCase))
-//                {
-//                    _logger.Log(
-//#if DEBUG
-//                        LogLevel.Critical,
-//#else
-//                        LogLevel.Warning,
-//#endif
-//                        "Schema validation: edge [{SourceNode}] -> [{TargetNode}]: " +
-//                        "type mismatch for '{Key}' — upstream produces '{SourceType}' but downstream expects '{TargetType}'.",
-//                        edge.From.Name, edge.To.Name, key, sourceProp.Type, targetProp.Type);
-//                }
-//            }
-//        }
-//    }
-
-//    /// <summary>
-//    /// Resolves the IRuleFlowUnit (action or condition) implementation for a given node.
-//    /// </summary>
-//    private IRuleFlowUnit? ResolveFlowUnit(FlowNode node)
-//    {
-//        if (node == null || string.IsNullOrEmpty(node.Name))
-//        {
-//            return null;
-//        }
-
-//        if (RuleConstant.ROOT_NODE_TYPES.Contains(node.Type, StringComparer.OrdinalIgnoreCase))
-//        {
-//            return _services.GetServices<IRuleRoot>()
-//                            .FirstOrDefault(x => x.Name.IsEqualTo(node.Name));
-//        }
-
-//        if (RuleConstant.END_NODE_TYPES.Contains(node.Type, StringComparer.OrdinalIgnoreCase))
-//        {
-//            return _services.GetServices<IRuleEnd>()
-//                            .FirstOrDefault(x => x.Name.IsEqualTo(node.Name));
-//        }
-
-//        if (RuleConstant.ACTION_NODE_TYPES.Contains(node.Type, StringComparer.OrdinalIgnoreCase))
-//        {
-//            return _services.GetServices<IRuleAction>()
-//                            .FirstOrDefault(x => x.Name.IsEqualTo(node.Name));
-//        }
-
-//        if (RuleConstant.CONDITION_NODE_TYPES.Contains(node.Type, StringComparer.OrdinalIgnoreCase))
-//        {
-//            return _services.GetServices<IRuleCondition>()
-//                            .FirstOrDefault(x => x.Name.IsEqualTo(node.Name));
-//        }
-
-//        return null;
-//    }
-//#endregion
-
-
-//    #region Action
-//    private async Task<RuleNodeResult?> ExecuteAction(
-//        FlowNode node,
-//        FlowEdge incomingEdge,
-//        FlowGraph graph,
-//        Agent agent,
-//        IRuleTrigger trigger,
-//        RuleFlowContext context)
-//    {
-//        try
-//        {
-//            // Find the matching action
-//            var foundAction = GetRuleAction(node, agent, trigger);
-//            if (foundAction == null)
-//            {
-//                var errorMsg = $"No rule action {node?.Name} is found";
-//                _logger.LogWarning(errorMsg);
-//                return null;
-//            }
-
-//            _logger.LogInformation("Start execution rule action {ActionName} for agent {AgentId} with trigger {TriggerName}",
-//                foundAction.Name, agent.Id, trigger.Name);
-
-//            var hooks = _services.GetHooks<IRuleTriggerHook>(agent.Id);
-//            foreach (var hook in hooks)
-//            {
-//                await hook.BeforeRuleActionExecuting(agent, node, incomingEdge, trigger, context);
-//            }
-
-//            // Execute action
-//            context.Parameters ??= [];
-//            var result = await foundAction.ExecuteAsync(agent, trigger, context);
-
-//            foreach (var hook in hooks)
-//            {
-//                await hook.AfterRuleActionExecuted(agent, node, incomingEdge, trigger, context, result);
-//            }
-
-//            return result;
-//        }
-//        catch (Exception ex)
-//        {
-//            _logger.LogError(ex, "Error executing rule action {ActionName} for agent {AgentId}", node?.Name, agent.Id);
-//            return new RuleNodeResult
-//            {
-//                Success = false,
-//                ErrorMessage = ex.Message
-//            };
-//        }
-//    }
-
-//    // Find the matching action
-//    private IRuleAction? GetRuleAction(FlowNode node, Agent agent, IRuleTrigger trigger)
-//    {
-//        var actions = _services.GetServices<IRuleAction>()
-//                               .Where(x => x.Name.IsEqualTo(node?.Name))
-//                               .ToList();
-
-//        var found = actions.FirstOrDefault(x => !string.IsNullOrEmpty(x.AgentId) && x.AgentId.IsEqualTo(agent.Id) && x.Triggers?.Contains(trigger.Name) == true);
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = actions.FirstOrDefault(x => !string.IsNullOrEmpty(x.AgentId) && x.AgentId.IsEqualTo(agent.Id));
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = actions.FirstOrDefault(x => x.Triggers?.Contains(trigger.Name, StringComparer.OrdinalIgnoreCase) == true);
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = actions.FirstOrDefault();
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        return null;
-//    }
-//    #endregion
-
-
-//    #region Condition
-//    private async Task<RuleNodeResult?> ExecuteCondition(
-//        FlowNode node,
-//        FlowEdge incomingEdge,
-//        FlowGraph graph,
-//        Agent agent,
-//        IRuleTrigger trigger,
-//        RuleFlowContext context)
-//    {
-//        try
-//        {
-//            // Find the matching condition
-//            var foundCondition = GetRuleCondition(node, agent, trigger);
-//            if (foundCondition == null)
-//            {
-//                var errorMsg = $"No rule condition {node?.Name} is found";
-//                _logger.LogWarning(errorMsg);
-//                return null;
-//            }
-
-//            _logger.LogInformation("Start execution rule condition {ConditionName} for agent {AgentId} with trigger {TriggerName}",
-//                foundCondition.Name, agent.Id, trigger.Name);
-
-//            var hooks = _services.GetHooks<IRuleTriggerHook>(agent.Id);
-//            foreach (var hook in hooks)
-//            {
-//                await hook.BeforeRuleConditionExecuting(agent, node, incomingEdge, trigger, context);
-//            }
-
-//            // Execute condition
-//            context.Parameters ??= [];
-//            var result = await foundCondition.EvaluateAsync(agent, trigger, context);
-
-//            foreach (var hook in hooks)
-//            {
-//                await hook.AfterRuleConditionExecuted(agent, node, incomingEdge, trigger, context, result);
-//            }
-
-//            return result;
-//        }
-//        catch (Exception ex)
-//        {
-//            _logger.LogError(ex, "Error executing rule condition {ConditionName} for agent {AgentId}", node?.Name, agent.Id);
-//            return new RuleNodeResult
-//            {
-//                Success = false,
-//                ErrorMessage = ex.Message
-//            };
-//        }
-//    }
-
-//    // Find the matching condition
-//    private IRuleCondition? GetRuleCondition(FlowNode node, Agent agent, IRuleTrigger trigger)
-//    {
-//        var conditions = _services.GetServices<IRuleCondition>()
-//                               .Where(x => x.Name.IsEqualTo(node?.Name))
-//                               .ToList();
-
-//        var found = conditions.FirstOrDefault(x => !string.IsNullOrEmpty(x.AgentId) && x.AgentId.IsEqualTo(agent.Id) && x.Triggers?.Contains(trigger.Name) == true);
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = conditions.FirstOrDefault(x => !string.IsNullOrEmpty(x.AgentId) && x.AgentId.IsEqualTo(agent.Id));
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = conditions.FirstOrDefault(x => x.Triggers?.Contains(trigger.Name, StringComparer.OrdinalIgnoreCase) == true);
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        found = conditions.FirstOrDefault();
-//        if (found != null)
-//        {
-//            return found;
-//        }
-
-//        return null;
-//    }
-//    #endregion
-
-
-//    #region Private methods
-//    private Dictionary<string, string?> BuildParameters(
-//        IEnumerable<MessageState>? states,
-//        Dictionary<string, string?>? param = null)
-//    {
-//        var dict = new Dictionary<string, string?>();
-
-//        if (!states.IsNullOrEmpty())
-//        {
-//            foreach (var state in states!)
-//            {
-//                dict[state.Key] = state.Value?.ConvertToString();
-//            }
-//        }
-
-//        if (!param.IsNullOrEmpty())
-//        {
-//            foreach (var pair in param!)
-//            {
-//                dict[pair.Key] = pair.Value;
-//            }
-//        }
-
-//        return dict;
-//    }
-//    #endregion
-
-
-    #region Legacy conversation
-    private async Task<string> SendMessageToAgent(Agent agent, IRuleTrigger trigger, string text, IEnumerable<MessageState>? states = null)
+    #region Send message to agent
+    private async Task<string> SendMessageToAgent(IServiceProvider sp, Agent agent, IRuleTrigger trigger, string title, string msg, IEnumerable<MessageState>? states = null, RuleTriggerOptions? options = null)
     {
-        var convService = _services.GetRequiredService<IConversationService>();
+        var convService = sp.GetRequiredService<IConversationService>();
         var conv = await convService.NewConversation(new Conversation
         {
             Channel = trigger.Channel,
-            Title = text,
+            Title = title,
             AgentId = agent.Id
         });
 
-        var message = new RoleDialogModel(AgentRole.User, text);
+        // Reported here rather than on the way out: everything below can throw, and the conversation
+        // already exists by this point, so a caller that only saw the returned ids would be left with a
+        // conversation nothing points at. Awaited so the caller has finished recording it before the parts
+        // that can fail run.
+        await NotifyConversationCreated(options, conv.Id);
 
         var allStates = new List<MessageState>
         {
-            new("channel", trigger.Channel)
+            new(StateConst.CHANNEL, trigger.Channel)
         };
 
         if (!states.IsNullOrEmpty())
         {
             allStates.AddRange(states!);
         }
+
+        var message = new RoleDialogModel(AgentRole.User, RenderMessage(sp, msg, allStates));
+
+        // Subscribe the message hub observers so the rule-triggered conversation emits the same
+        // events (streaming, indications, etc.) as a user-initiated one.
+        var observer = sp.GetRequiredService<IObserverService>();
+        using var container = observer.SubscribeObservers<HubObserveData<RoleDialogModel>>(conv.Id);
 
         await convService.SetConversationId(conv.Id, allStates);
         await convService.SendMessage(agent.Id,
@@ -787,8 +255,61 @@ public class RuleEngine : IRuleEngine
             msg => Task.CompletedTask);
 
         await convService.SaveStates();
-
         return conv.Id;
+    }
+
+    /// <summary>
+    /// Tells the caller a conversation was created, if it asked to be told.
+    /// </summary>
+    /// <remarks>
+    /// Failures are swallowed on purpose: the callback is a caller's bookkeeping, and letting it cost the
+    /// rule the run it is in the middle of would be the worse outcome of the two.
+    /// </remarks>
+    private async Task NotifyConversationCreated(RuleTriggerOptions? options, string conversationId)
+    {
+        if (options?.OnConversationCreated == null || string.IsNullOrEmpty(conversationId))
+        {
+            return;
+        }
+
+        try
+        {
+            await options.OnConversationCreated(conversationId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, $"Error when reporting the created conversation ({conversationId}) back to the rule trigger caller.");
+        }
+    }
+
+    private string RenderMessage(IServiceProvider sp, string msg, IEnumerable<MessageState> states)
+    {
+        if (string.IsNullOrWhiteSpace(msg))
+        {
+            return msg;
+        }
+
+        try
+        {
+            var data = new Dictionary<string, object>();
+            foreach (var state in states)
+            {
+                if (string.IsNullOrEmpty(state.Key))
+                {
+                    continue;
+                }
+
+                data[state.Key] = state.Value;
+            }
+
+            var render = sp.GetRequiredService<ITemplateRender>();
+            return render.Render(msg, data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, $"Unable to render the rule message template, falling back to the raw message ({msg}).");
+            return msg;
+        }
     }
     #endregion
 }

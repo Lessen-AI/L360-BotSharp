@@ -1,5 +1,6 @@
 using BotSharp.Abstraction.Agents.Models;
 using BotSharp.Abstraction.Infrastructures.Attributes;
+using BotSharp.Abstraction.Repositories;
 using BotSharp.Abstraction.Tasks;
 
 namespace BotSharp.OpenAPI.Controllers;
@@ -40,8 +41,15 @@ public partial class AgentController : ControllerBase
             AgentIds = [id]
         });
 
-        var foundAgent = pagedAgents.Items.FirstOrDefault();
-        if (foundAgent == null) return null;
+        var cachedAgent = pagedAgents.Items.FirstOrDefault();
+        if (cachedAgent == null) return null;
+
+        // GetAgents is cached and shared with every other caller. Inherit into a copy with its own lists,
+        // and give the view its own routing rules, because RedirectToAgentName is written to them below.
+        var foundAgent = cachedAgent.ShallowCopy();
+        foundAgent.Templates = cachedAgent.Templates?.ToList() ?? [];
+        foundAgent.Functions = cachedAgent.Functions?.ToList() ?? [];
+        foundAgent.RoutingRules = cachedAgent.RoutingRules?.Select(x => x.Clone()).ToList() ?? [];
 
         await _agentService.InheritAgent(foundAgent);
         var targetAgent = AgentViewModel.FromAgent(foundAgent);
@@ -107,8 +115,28 @@ public partial class AgentController : ControllerBase
     }
 
     [HttpPost("/agent")]
-    public async Task<AgentViewModel> CreateAgent(AgentCreationModel agent)
+    public async Task<ActionResult<AgentViewModel>> CreateAgent(AgentCreationModel agent)
     {
+        if (!string.IsNullOrEmpty(agent.Id))
+        {
+            if (!Guid.TryParse(agent.Id, out _))
+            {
+                return BadRequest($"Invalid agent id: {agent.Id}");
+            }
+
+            var db = _services.GetRequiredService<IBotSharpRepository>();
+            if (await db.GetAgent(agent.Id, basicsOnly: true) != null)
+            {
+                return Conflict($"Agent {agent.Id} already exists.");
+            }
+
+            var sameName = await db.GetAgents(new AgentFilter { AgentNames = [agent.Name] });
+            if (sameName.Any())
+            {
+                return Conflict($"Agent named \"{agent.Name}\" already exists.");
+            }
+        }
+
         var createdAgent = await _agentService.CreateAgent(agent.ToAgent());
         return AgentViewModel.FromAgent(createdAgent);
     }
@@ -119,6 +147,9 @@ public partial class AgentController : ControllerBase
     {
         return await _agentService.RefreshAgents(request?.AgentIds);
     }
+
+    [HttpGet("/file-agents")]
+    public Task<List<IdName>> GetFileAgents() => _agentService.GetFileAgents();
 
     [HttpPut("/agent/{agentId}")]
     public async Task UpdateAgent([FromRoute] string agentId, [FromBody] AgentUpdateModel agent)
